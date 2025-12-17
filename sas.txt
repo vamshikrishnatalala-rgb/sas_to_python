@@ -1,0 +1,1711 @@
+%macro util_dec_aco_charg_ods;
+    options mprint ;
+
+    %util_variables_globales ;
+
+    /* R�CUP�RATION ID_TRT et DATE_BATCH_TRT*/
+    %util_dec_aco_recup_id_trt ;
+
+    /* R�cup�ration de la date d'arr�t� de GFP */
+    data _null_;
+      set &lib_dec_aco_suivi..ACO_SUIVI_DAT_ARRETE (where=(ID_TRT=&MV_ID_TRT.)) end=eof;
+      call symputx(compress("MV_DAT_ARRETE_"!!ID_SYS_GEST),DAT_ARRETE,'G');
+    run;
+
+ 	/* R�cup�ration de la date d'arr�t� ALTO */
+    data _null_;
+      set &lib_dec_aco_suivi..ACO_SUIVI_DAT_ARRETE_ALTO (where=(ID_TRT=&MV_ID_TRT.)) end=eof;
+      call symputx("DT_ARRETE_ALTO",DAT_ARRETE,'G');
+    run;
+
+   /* INITIALISATION FLAG */
+    %let FLG_DBL = N; 
+
+    /* ALIMENTATION TABLE DE SUIVI TRAITEMENT */
+    %let today_dttm= %sysfunc(datetime()) ;
+    %let today_dt  = %sysfunc(date()) ;
+    %util_dec_aco_alim_suivi_trt(ID_TRT=&MV_ID_TRT., DAT_BATCH_TRT=&MV_DAT_BATCH_TRT., NOM_TRT="CHARGEMENT_ODS", DAT_REEL_TRT=&today_dttm., 
+                                 MESG="D�but Traitement CHARGEMENT_ODS", CD_RETOUR=0) ;
+
+    /* ON NE CHARGE QUE LES TABLES DU TRAITEMENT EN COURS */
+    /* Sont "O" dans tampon et "N" dans ODS et date vide dans ODS */
+    /* Indique s'il y a ou non des tables � charger via le nombre de ligne du r�sultat */
+    proc sql noprint ;
+        create table WORK._A_CHARGER_DANS_ODS as 
+        select  B.NOM_TAB_TAMPON, B.LIBNAME_TAMPON, B.NOM_TAB_ODS, B.LIBNAME_ODS, B.LIBNAME_ODS_CONF,  
+                C.ID_TRT, C.ID_FIC, C.NOM_FIC, C.ID_SYS_GEST,
+                D.REP_ENT_ACO, D.REP_FIC_KO, B.TYP_STRUCTURE_FIC
+        from  &lib_dec_aco_prm..ACO_TAB_ODS B
+        inner join &lib_dec_aco_suivi..ACO_SUIVI_CHG_TAMPON_ODS C
+            on B.NOM_TAB_TAMPON = C.NOM_TAB_TAMPON
+        inner join &lib_dec_aco_prm..ACO_SYS_GEST D
+            on C.ID_SYS_GEST = D.ID_SYS_GEST
+        where C.ID_TRT=&MV_ID_TRT.
+              and C.FLG_TRAITE_TAMPON="O"
+              and C.FLG_TRAITE_ODS="N"
+              and C.DAT_REEL_TRT_ODS=.
+        ;
+    quit ;
+
+    /* NOMBRE D'OBSERVATIONS DE LA TABLE CREEE */
+    %LET DSID   = %sysfunc(OPEN(_A_CHARGER_DANS_ODS,IN)) ;
+    %LET NB_TAB_A_CHG = %sysfunc(ATTRN(&DSID,NOBS)) ;
+    %if &DSID. > 0 %then %LET RC = %sysfunc(CLOSE(&DSID)) ;
+
+    /* ALIMENTATION TABLE DE SUIVI TRAITEMENT */
+    %let today_dttm= %sysfunc(datetime()) ;    %let today_dt  = %sysfunc(date()) ;
+    %util_dec_aco_alim_suivi_trt(ID_TRT=&MV_ID_TRT., DAT_BATCH_TRT=&MV_DAT_BATCH_TRT., NOM_TRT="CHARGEMENT_ODS", DAT_REEL_TRT=&today_dttm., 
+                                 MESG="%sysfunc(STRIP(&NB_TAB_A_CHG.)) table(s) � charger dans ODS", CD_RETOUR=0) ;
+
+    /* SI IL Y A DES TABLES A CHARGER, */
+    /* Sinon, on va � la fin du programme et mentionne que "rien � charger" */
+    %if &NB_TAB_A_CHG. > 0 %then %do ;
+        
+        /* RECUPERATION DES INFOS DES TABLES A CHARGER */
+        data _NULL_ ;
+            set WORK._A_CHARGER_DANS_ODS ;
+            call symput(cats("NOM_TAB_TAMPON_", _N_),  strip(NOM_TAB_TAMPON)) ;
+            call symput(cats("NOM_TAB_ODS_", _N_),     strip(NOM_TAB_ODS)) ;
+            call symput(cats("TYP_TAB_ODS_", _N_),     strip(TYP_STRUCTURE_FIC)) ;
+            call symput(cats("NOM_LIB_TAMPON_", _N_),  strip(LIBNAME_TAMPON)) ;
+            call symput(cats("NOM_LIB_ODS_", _N_),     strip(LIBNAME_ODS)) ;
+            call symput(cats("NOM_LIB_ODS_C_", _N_),   strip(LIBNAME_ODS_CONF)) ;
+            call symput(cats("REF_FIC_ENT_", _N_),     strip(REP_ENT_ACO)) ;
+            call symput(cats("REF_FIC_KO_", _N_),      strip(REP_FIC_KO)) ;
+            call symput(cats("ID_FIC_", _N_),          strip(ID_FIC)) ;
+            call symput(cats("NOM_FIC_", _N_),         strip(NOM_FIC)) ;
+            call symput(cats("ID_SYS_GEST_", _N_),     strip(ID_SYS_GEST)) ;/*Ajout 20/02/2019 */
+        run ; 
+
+         /* 30/01/2018 - BSI -> Ajout d'une proc�dure de tri sur le fichier param�tre de structure des fichiers pour appliquer le bon ordre des champs */
+         /* 18/01/2019 - ajout du where=(FLG_ACTIF='O') */
+        proc sort data=&lib_dec_aco_prm..ACO_STRUCT_TAB (where=(FLG_ACTIF='O')) out = STRUCT_TAB_TRIEE_ODS ;
+            by TYP_STRUCTURE_FIC POSITION_CHAMP ;
+        run ;
+
+        /* Boucle sur chaque fichier � charger */
+        %let i = 1 ;
+        %do i=1 %to &NB_TAB_A_CHG. ;
+
+            /* initialisation de la variable � N / va basculer O si pr�sence de champ � exclure */
+            %let PRESENCE_VAR_EXCLURE&i = N ;
+
+         /* Nbre observation des fichiers � charger */
+          %let DSID = %sysfunc(OPEN(&&NOM_LIB_TAMPON_&i...&&NOM_TAB_TAMPON_&I.,IN)) ;
+             %let NB_OBS&I. = %sysfunc(ATTRN(&DSID,NOBS)) ;
+           %if &DSID. > 0 %then %LET RC = %sysfunc(CLOSE(&DSID)) ;
+
+            /* RECUPERATION DE LA STRUCTURE DES TABLES A CHARGER */
+            data WORK.STRUCTURE_TABLE ;
+                set WORK.STRUCT_TAB_TRIEE_ODS (where=(TYP_STRUCTURE_FIC="&&TYP_TAB_ODS_&I." )) end=fin ;
+                attrib L_LENGHT length=$10. format=$10. ;
+
+                retain NB_CLE NB_CLE_C NB_CLE_N NB_VAR_C NB_VAR_N NB_VAR_D 0 ;
+                if FLG_CLE = "O" then do ;
+                    NB_CLE+1 ;
+                    if TYP_CHAMP="C" then NB_CLE_C + 1 ;
+                    else NB_CLE_N + 1 ;
+                end ;
+                if TYP_CHAMP = "C" then NB_VAR_C+1 ;
+                else if TYP_CHAMP = "N" then NB_VAR_N+1 ;
+                else if TYP_CHAMP = "D" then NB_VAR_D+1 ;
+                    
+                if TYP_CHAMP="C" then L_LENGHT=CATS("$", LONG_CHAMP, ".") ; else L_LENGHT="8" ;
+                /* Si au moins une variable � exlure, on initialise � "O" */
+                if FLG_EXCLUSION_DIFF = "O" then call symputx(cats("PRESENCE_VAR_EXCLURE",&i.), FLG_EXCLUSION_DIFF) ;
+
+                if INFORM_CHAMP="" then INFORM_CHAMP=FORM_CHAMP ;
+                call symputx(cats("NOM_CHAMP_", _N_), NOM_CHAMP) ;
+                call symputx(cats("TYP_CHAMP_", _N_), TYP_CHAMP) ;
+                call symputx(cats("FORMAT_", _N_), FORM_CHAMP) ;
+                call symputx(cats("INFORMAT_", _N_), INFORM_CHAMP) ;
+                call symputx(cats("LENGTH_", _N_), L_LENGHT) ;
+                call symputx(cats("FLG_CLE_", _N_), FLG_CLE) ;
+                call symputx(cats("FLG_EXCLUSION_DIFF_", _N_), FLG_EXCLUSION_DIFF) ;
+               /* call symputx(cats("FLG_ACTIF_", _N_), FLG_ACTIF) ;*/
+                call symputx(cats("FLG_CONF_", _N_), FLG_CONFIDENTIEL) ;
+                call symputx(cats("NIV_CONF_", _N_), NIV_CONFIDENTIEL) ;
+                call symputx(cats("FLG_ALL_LIB_",_N_), FLG_ALL_LIB ) ; /* BSI - 26/07/2019 */
+
+                /*---( Modif 04/12/2017 : ajouter la colonne FMT_DECIMAl )---*/
+                call symputx(cats("FMT_DECIMAL_", _N_), FMT_DECIMAL) ;
+
+            /*---( Modif 22/10/2019 : ajouter la colonne SYMBOL_MT_NEGATIF )---*/
+                call symputx(cats("SYMBOL_MT_NEGATIF_", _N_), SYMBOL_MT_NEGATIF) ;
+
+                call symputx("NB_CHAMP", _N_) ;
+                if fin then do ;
+                    call symput(cats("NB_VAR_C", &I.), NB_VAR_C) ;
+                    call symput(cats("NB_VAR_N", &I.), NB_VAR_N) ;
+                    call symput(cats("NB_VAR_D", &I.), NB_VAR_D) ;
+                    call symput(cats("NB_CLE", &I.), NB_CLE) ;
+                    call symput(cats("NB_CLE_N", &I.), NB_CLE_N) ;
+                    call symput(cats("NB_CLE_C", &I.), NB_CLE_C) ;
+                end ;
+
+            run ;
+
+            /* SI DES CLES SONT DEFINIES SUR LA TABLE, ALORS ANALYSE DES DOUBLONS POUR EXCLUSION */             
+            %if &&NB_CLE&I. > 0 %then %do ;
+
+                data _NULL_ ;
+                    set S_DACPRM.ACO_TAB_ODS (where=(NOM_TAB_TAMPON="&&NOM_TAB_TAMPON_&i..")) end = fin ;
+                    if fin then call symputx("NOM_COURT&i", typ_structure_fic, "G") ;
+                run ;
+
+                /* on met dans ALL_CLE, la liste des cl�s s�par�es par des virgules  */
+                /* on met dans ONE_CLE, une des variables de la cl� pour le group by */
+                data WORK.CLE ;
+                    set WORK.STRUCTURE_TABLE (where=(typ_structure_fic="&&NOM_COURT&i..")) end=fin ;
+                    length all_cle $32767. ;
+                    retain all_cle nom_champ "" ;
+                    if flg_cle = 'O' then do ; 
+                        all_cle = catx(",", all_cle, nom_champ) ;
+                        call symputx("ONE_CLE", nom_champ, "G") ;
+                    end ;
+                    if fin then do ;
+                        call symputx("ALL_CLE", all_cle, "G") ;
+                    end ;
+                run ;
+
+                /* table sans doublon */
+                /* ATTENTION, doit �tre supprim�es apr�s utilisation sinon pb avec "merge" */
+                proc SQL ;
+                   create table WORK.&&NOM_TAB_TAMPON_&I. AS 
+                   select distinct *
+                      from &&NOM_LIB_TAMPON_&i...&&NOM_TAB_TAMPON_&I. t1
+                   group by &ALL_CLE.
+                   having N(&one_cle.)+NMISS(&one_cle.) = 1 ;
+                quit ;
+                
+                /* table des doublons */
+                proc SQL ;
+                   create table WORK.DBL_&I. AS 
+                   select distinct *
+                      from &&NOM_LIB_TAMPON_&i...&&NOM_TAB_TAMPON_&I. t1
+                   group by &ALL_CLE.
+                   having N(&one_cle.)+NMISS(&one_cle.) > 1 ;
+                quit ;
+
+                %LET DSID = %sysfunc(OPEN(WORK.DBL_&I.,IN)) ;
+                %LET NB_DOUBL&I = %sysfunc(ATTRN(&DSID,NOBS)) ;
+                %LET RC = %sysfunc(CLOSE(&DSID)) ;
+                %if &&NB_DOUBL&I. > 0 %then %do;
+                    %LET FLG_DBL=O ;
+                %end;  
+
+                /* SI PRESENCE DE DOUBLONS => ALIMENTATION DE LA TABLE SUIVI_DOUBLONS */
+                %if &&NB_DOUBL&I. > 0 %then %do ;
+                    %let today_dttm= %sysfunc(datetime()) ;
+                    proc sql noprint ;
+                        insert into &lib_dec_aco_suivi..ACO_SUIVI_DOUBLONS(ID_TRT, DAT_BATCH_TRT, DAT_REEL_TRT, TABLE, CLE, NB_DOUBLONS, NB_OBS_TABLE)
+                        values (&MV_ID_TRT., &MV_DAT_BATCH_TRT., &today_dttm., "&&NOM_TAB_TAMPON_&i..", "&ALL_CLE.", &&NB_DOUBL&I., &&NB_OBS&I.) ;
+                    quit ;
+
+                    /* NOMBRE DOUBLONS DANS LA TABLE TAMPON */
+                    %let today_dttm= %sysfunc(datetime()) ;
+                    %let today_dt  = %sysfunc(date()) ;
+                    %util_dec_aco_alim_suivi_trt(ID_TRT=&MV_ID_TRT., DAT_BATCH_TRT=&MV_DAT_BATCH_TRT., NOM_TRT="CHARGEMENT_ODS", DAT_REEL_TRT=&today_dttm., 
+                                                 MESG="La table %sysfunc(STRIP(&&NOM_TAB_TAMPON_&I.)) contient %sysfunc(STRIP(&&NB_DOUBL&I.)) doublons ", 
+                                                 CD_RETOUR=0) ;
+
+                %end ;
+               
+                data WORK._&&NOM_TAB_ODS_&I.(KEEP=%do J=1 %to &NB_CHAMP. ; &&NOM_CHAMP_&J. %end ;)
+                    WORK._ERREUR&I WORK._ERR_CHAR&I WORK._ERR_DATE&I WORK._ERR_NUM&I WORK._ERR_CLE&I ; /* Toutes les tables d'erreurs */
+
+                    set WORK.&&NOM_TAB_TAMPON_&I. (RENAME=(%do J=1 %to &NB_CHAMP. ; &&NOM_CHAMP_&J.=_&&NOM_CHAMP_&J. %end ;) )end=FIN ;
+
+                    %do J=1 %to &NB_CHAMP. ;
+                        attrib &&NOM_CHAMP_&J. length=&&length_&J format=&&format_&J. INformat=&&INFORMAT_&J. ;
+                        attrib ERR_&&NOM_CHAMP_&J. length=8 format=8. ;
+                  /* Modif 22/10/2019 */
+                        %if "&&SYMBOL_MT_NEGATIF_&J." ^= "" %then %do ;
+                           if substr(_&&NOM_CHAMP_&J., 1, length("&&SYMBOL_MT_NEGATIF_&J.")) = "&&SYMBOL_MT_NEGATIF_&J." then substr(_&&NOM_CHAMP_&J., 1, length("&&SYMBOL_MT_NEGATIF_&J.")) = '-' ;
+                           else substr(_&&NOM_CHAMP_&J., 1, length("&&SYMBOL_MT_NEGATIF_&J.")) = '+' ;
+                            
+                            /* 26/02/2020 - Si le montant �tait vide alors on obtient un champ contenant uniquement le symbole + ou - */
+                     if compress(_&&NOM_CHAMP_&J.) = '+' or compress(_&&NOM_CHAMP_&J.) = '-' then _&&NOM_CHAMP_&J. = '' ;
+                     else _&&NOM_CHAMP_&J.=compress(_&&NOM_CHAMP_&J.) ;
+                         %end ;
+               /* 04/03/2020 - Remplacement des valeurs par d�faut pour la dates */
+                  %if &&TYP_CHAMP_&J.=D %then %do;
+                     if _&&NOM_CHAMP_&J. = '00000000' then _&&NOM_CHAMP_&J. = '' ;
+                  %end;
+                  /* Modif 04/12/2017 - */
+                        %if &&FMT_DECIMAL_&J. > 0 %then %do ;
+                            &&NOM_CHAMP_&J. = INPUT(_&&NOM_CHAMP_&J.,&&INFORMAT_&J.)/ &&FMT_DECIMAL_&J. ;
+                        %end ;
+                        %else %do ;
+                            &&NOM_CHAMP_&J. = INPUT(_&&NOM_CHAMP_&J.,&&INFORMAT_&J.) ;
+                        %end ;
+                    %end ;
+                    %do J=1 %to &NB_CHAMP. ; 
+                        %if &&FLG_CLE_&J. = O and &&TYP_CHAMP_&J.=N %then %do ; attrib ERR_CLE_N&&NOM_CHAMP_&J. length=8 format=8. ; %end ;
+                        %else %if &&FLG_CLE_&J. = O and &&TYP_CHAMP_&J.=C %then %do ; attrib ERR_CLE_C&&NOM_CHAMP_&J. length=8 format=8. ; %end ;
+                    %end ;
+
+                    %if &&NB_VAR_C&I. > 0 %then %do ;
+                        array A_CHAR_ORI(*)    %do J=1 %to &NB_CHAMP. ; %if &&TYP_CHAMP_&J.=C %then %do ; _&&NOM_CHAMP_&J.      %end ; %end ; ; /* Toutes les var char origine */
+                        array A_CHAR_FIN(*)    %do J=1 %to &NB_CHAMP. ; %if &&TYP_CHAMP_&J.=C %then %do ;  &&NOM_CHAMP_&J.      %end ; %end ; ; /* Toutes les var char cible   */
+                        array A_CHAR_ERR(*)    %do J=1 %to &NB_CHAMP. ; %if &&TYP_CHAMP_&J.=C %then %do ; ERR_&&NOM_CHAMP_&J. %end ; %end ; ; /* Identification de chaque erreur char*/
+                    %end ;
+                    /* LMA : RUSTINE POUR FICHIER SANS DATE. IL FAUT CONDITIONNER SUR PRESENCE DATE A SUPPRIMER*/
+                    %if &&NB_VAR_D&I. > 0 %then %do ;
+                        array A_DATE_ORI(*)    %do J=1 %to &NB_CHAMP. ; %if &&TYP_CHAMP_&J.=D %then %do ; _&&NOM_CHAMP_&J.      %end ; %end ; ; /* Toutes les var date origine */
+                        array A_DATE_FIN(*)    %do J=1 %to &NB_CHAMP. ; %if &&TYP_CHAMP_&J.=D %then %do ;  &&NOM_CHAMP_&J.      %end ; %end ; ; /* Toutes les var date cible   */
+                        array A_DATE_ERR(*)    %do J=1 %to &NB_CHAMP. ; %if &&TYP_CHAMP_&J.=D %then %do ; ERR_&&NOM_CHAMP_&J. %end ; %end ; ; /* Identification de chaque erreur date*/
+                    %end ;
+                    %if &&NB_VAR_N&I. > 0 %then %do ;
+                        array A_NUM_ORI(*)    %do J=1 %to &NB_CHAMP. ; %if &&TYP_CHAMP_&J.=N %then %do ; _&&NOM_CHAMP_&J.      %end ; %end ; ; /* Toutes les var num origine  */
+
+
+                        array A_NUM_FIN(*)    %do J=1 %to &NB_CHAMP. ; %if &&TYP_CHAMP_&J.=N %then %do ;  &&NOM_CHAMP_&J.      %end ; %end ; ; /* Toutes les var num cible    */
+                        array A_NUM_ERR(*)    %do J=1 %to &NB_CHAMP. ; %if &&TYP_CHAMP_&J.=N %then %do ; ERR_&&NOM_CHAMP_&J. %end ; %end ; ; /* Identification de chaque erreur num */
+                    %end ;
+
+                    %if &&NB_CLE_C&I. ne 0 %then %do ;
+                        array A_CLE_C(*)     %do J=1 %to &NB_CHAMP. ; %if &&FLG_CLE_&J. = O and &&TYP_CHAMP_&J.=C %then %do ;  &&NOM_CHAMP_&J.    %end ; %end ; ; /* Toutes les cl�s */
+                        array A_CLE_C_ERR(*) %do J=1 %to &NB_CHAMP. ; %if &&FLG_CLE_&J. = O and &&TYP_CHAMP_&J.=C %then %do ; ERR_CLE_C&&NOM_CHAMP_&J. %end ; %end ; ; /* Identification de chaque erreur de cl� */
+                    %end ;
+                    %if &&NB_CLE_N&I. ne 0 %then %do ;
+                        array A_CLE_N(*)     %do J=1 %to &NB_CHAMP. ; %if &&FLG_CLE_&J. = O and &&TYP_CHAMP_&J.=N %then %do ;  &&NOM_CHAMP_&J.    %end ; %end ; ; /* Toutes les cl�s */
+                        array A_CLE_N_ERR(*) %do J=1 %to &NB_CHAMP. ; %if &&FLG_CLE_&J. = O and &&TYP_CHAMP_&J.=N %then %do ; ERR_CLE_N&&NOM_CHAMP_&J. %end ; %end ; ; /* Identification de chaque erreur de cl� */
+                    %end ;
+
+                    /* LMA : RUSTINE POUR FICHIER SANS DATE. IL FAUT CONDITIONNER SUR PRESENCE DATE. A SUPPRIMER*/
+                    %if &&NB_VAR_D&I. > 0 %then %do ;
+                        do K=1 TO DIM(A_DATE_ORI) ;
+                            if A_DATE_FIN{K} = . and A_DATE_ORI{K} NE "" then A_DATE_ERR{K}=1 ; else A_DATE_ERR{K}=0 ;
+                            ALL_ERR_DATE=SUM (OF A_DATE_ERR[*]) ;
+                        end ;
+                    %end ;    
+                    %if &&NB_VAR_N&I. > 0 %then %do ;
+                        do L=1 TO DIM(A_NUM_ORI) ;
+                            if A_NUM_FIN{L} = . and A_NUM_ORI{L} NE "" then A_NUM_ERR{L}=1 ; else A_NUM_ERR{L}=0 ;
+                            ALL_ERR_NUM=SUM (OF A_NUM_ERR[*]) ;
+                        end ;
+                    %end ;
+                    %if &&NB_VAR_C&I. > 0 %then %do ;
+                        do M=1 to DIM(A_CHAR_ORI) ;
+                            if A_CHAR_FIN{M} NE A_CHAR_ORI{M} then A_CHAR_ERR{M}=1 ; else A_CHAR_ERR{M}=0 ;
+                            ALL_ERR_CHAR=SUM (OF A_CHAR_ERR[*]) ;
+                        end ;    
+                    %end ;
+
+                    /* -CBO- modification, � la demande de la MOA, on supporte les cl� vides */
+                    /*
+                    %if &&NB_CLE_C&I. ne 0 %then %do ;
+                        do N=1 TO DIM(A_CLE_C) ;
+                            if A_CLE_C{N} = "" then A_CLE_C_ERR{N}=1 ; else A_CLE_C_ERR{N}=0 ;
+                            ALL_CLE_C_ERR=SUM (OF A_CLE_C_ERR[*]) ;
+                        end ;
+                    %end ;
+                    %if &&NB_CLE_N&I. ne 0 %then %do ;
+                        do O=1 TO DIM(A_CLE_N) ;
+                            if A_CLE_N{O} = . then A_CLE_N_ERR{O}=1 ; else A_CLE_N_ERR{O}=0 ;
+                            ALL_CLE_N_ERR=SUM (OF A_CLE_N_ERR[*]) ;
+                        end ;
+                    %end ;
+                    */    
+
+                    if ALL_ERR_CHAR  > 0 then output WORK._ERR_CHAR&I ;
+                    if ALL_ERR_DATE  > 0 then output WORK._ERR_DATE&I ;
+                    if ALL_ERR_NUM   > 0 then output WORK._ERR_NUM&I ;
+                    if ALL_CLE_N_ERR > 0 OR ALL_CLE_C_ERR > 0 then output WORK._ERR_CLE&I ;
+
+                    if ALL_ERR_CHAR > 0 OR ALL_ERR_DATE > 0 OR ALL_ERR_NUM > 0 OR ALL_CLE_C_ERR > 0 OR ALL_CLE_N_ERR > 0 then output WORK._ERREUR&I ;
+                    else output WORK._&&NOM_TAB_ODS_&I. ;
+                    *DROP K L M N O ;
+                run ;
+
+                /* NOMBRE D'OBSERVATIONS DE LA TABLE _ERREUR */
+                %LET DSID   = %sysfunc(OPEN(_ERREUR&I.,IN)) ;
+                %LET NB_ERR&I. = %sysfunc(ATTRN(&DSID.,NOBS)) ;
+                %if &DSID. > 0 %then %LET RC = %sysfunc(CLOSE(&DSID.)) ;
+
+                /* SI AUCUNE ERREUR DETECTE, CHARGEMENT DANS ODS  */
+                %if &&NB_ERR&I. = 0 %then %do ;
+
+                    %put ----TABLE &&NOM_LIB_ODS_&I...&&NOM_TAB_ODS_&I. EXISTE ? : %sysfunc(EXIST(&&NOM_LIB_ODS_&I...&&NOM_TAB_ODS_&I.))---- ;
+
+                    /* On supprime les tables temporaires qui ont servi � la g�n�ration de tables avec et sans doublons */
+                    /* Sinon adh�rence avec le merge sur &&NOM_TAB_ODS_&I.: */
+                    proc datasets lib=work memtype=data ;
+                        delete &&NOM_TAB_TAMPON_&I. ;
+                    run ;
+
+                    /*********/
+                    /* CAS 1 */ 
+                    /*********/
+                    /* SI LA TABLE ODS EST ABSENTE, TABLE ODS = TABLE WORK._&&NOM_TAB_ODS_&I. : CREATION */
+                    %if %sysfunc(EXIST(&&NOM_LIB_ODS_&I...&&NOM_TAB_ODS_&I.)) = 0 %then %do ;
+
+                        /* supression des colonnes avec FLG_ACTIF = N */
+                      /*  data _&&NOM_TAB_ODS_&I.   
+                             (drop=%do J=1 %to &NB_CHAMP. ; %if &&FLG_ACTIF_&J. = N %then %do ; &&NOM_CHAMP_&J. %end ; %end ;) ;
+                            set WORK._&&NOM_TAB_ODS_&I. ;
+                        run ;*/
+
+                        data &&NOM_LIB_ODS_&I...&&NOM_TAB_ODS_&I.   
+                                (keep=%do J=1 %to &NB_CHAMP. ; %if &&FLG_CLE_&J. = O OR &&FLG_CONF_&J. = N or &&FLG_ALL_LIB_&J. = O %then %do ;  &&NOM_CHAMP_&J. %end ; %end ;
+                                        DAT_TRT DAT_DEB_VAL DAT_FIN_VAL COD_ETA NUM_SEQ DAT_DERN_RECPT /*20190909*/)
+                            /* AJOUT 12/02/18 : on envoie les donn�es confidentielles dans les 4 repertoires de destination selon NIV_CONF */
+                            %if "&&NOM_LIB_ODS_C_&i." ne ""  %then %do ;
+                                %do k = 1 %to 4 ;
+                                    &&NOM_LIB_ODS_C_&I..&k..&&NOM_TAB_ODS_&I.
+                                    (keep=%do J=1 %to &NB_CHAMP. ; %if &&FLG_CLE_&J. = O OR &&FLG_ALL_LIB_&J. = O OR (&&FLG_CONF_&J. = O and &&NIV_CONF_&j. = &k.) %then %do ; &&NOM_CHAMP_&J. %end ; %end ; /* BSI -26/07/2019 */
+                                           DAT_TRT DAT_DEB_VAL DAT_FIN_VAL COD_ETA NUM_SEQ DAT_DERN_RECPT /*20190909*/) 
+                                %end ;
+                            %end ;
+                            ;
+                            set WORK._&&NOM_TAB_ODS_&I. ;
+                            attrib DAT_TRT         length=8 /*format=DDMMYY10.*/ format=datetime20. ;
+                            attrib DAT_DEB_VAL     length=8 format=DDMMYY10. ;
+                            attrib DAT_FIN_VAL     length=8 format=DDMMYY10. ;
+                            attrib COD_ETA         length=8 format=8. ;
+                            attrib NUM_SEQ         length=8 format=8. ;
+                            attrib DAT_DERN_RECPT length=8 format=DDMMYY10. ; /*20190909*/
+
+                            /*DAT_TRT = &MV_DAT_BATCH_TRT. ;*/
+                            DAT_TRT = &today_dttm. ;
+                            /*20/02/2019 : ajout du cas GFP */
+                            %if "&&ID_SYS_GEST_&I."="GFP" %then %do;
+                               DAT_DEB_VAL = &MV_DAT_ARRETE_GFP.;
+                            %end;
+                            %else %if "&&ID_SYS_GEST_&I."="ALTO" %then %do;/*202312*/
+                               DAT_DEB_VAL = &DT_ARRETE_ALTO.;
+                            %end;
+                            %else %do;
+                               DAT_DEB_VAL = &MV_DAT_BATCH_TRT. ;
+                            %end;
+                            DAT_FIN_VAL = "31DEC9999"d ;
+                            COD_ETA = 1 ; 
+                            NUM_SEQ = 1 ;
+                            DAT_DERN_RECPT=DAT_DEB_VAL;/*20190909*/
+                        run ;
+
+                        /* AJOUT 12/02/18 : si pas de donn�es dans la table, on la supprime / ce cas arrive quand pas de donn�e confidentielle associ�e � NIV_CONF */
+                        %if "&&NOM_LIB_ODS_C_&i." ne ""  %then %do ;
+
+                            /* calcul du nombre de valeur cl�s de type FLG_CLE = "O" */
+                            proc sql noprint ;
+                                select count(FLG_CLE) into: SIZE_CLE
+                                from STRUCTURE_TABLE
+                                where FLG_CLE = "O" ;
+                            quit ;
+
+                            /* +6 car 6 est le nombre de cl� DAT_TRT DAT_DEB_VAL DAT_FIN_VAL COD_ETA NUM_SEQ DAT_DERN_RECPT + nombre de cl� "O" */
+                            %let SIZE_MIN_BASE = %sysevalf(&SIZE_CLE + 6) ;
+                        
+                            %do k = 1 %to 4 ;
+                                
+                                /* CBO - Modification : mani�re de calculer le nombre de colonne */
+                                data _NULL_ ;
+                                    dsid = open("&&NOM_LIB_ODS_C_&I..&k..&&NOM_TAB_ODS_&I..") ;                
+                                    vars = attrn(dsid,"NVARS") ;
+                                    call symputx("NB_COL_TABLi_&k",vars) ;
+                                    rc = close(dsid) ;
+                                run ;
+
+                                /* data _null_ ;
+                                   set SASHELP.VTABLE(WHERE=(libname="&&NOM_LIB_ODS_C_&I..&k." and memname = "&&NOM_TAB_ODS_&I..")) ;
+                                       call symput ("NB_COL_TABLi_&k",sum(num_character, num_numeric)) ;
+                                run ; */
+
+                                %if &&NB_COL_TABLi_&k. = &SIZE_MIN_BASE %then %do ;
+
+                                    %put la table &&NOM_LIB_ODS_C_&I..&k..&&NOM_TAB_ODS_&I.. est supprimee car elle ne contient pas de donnees ;
+
+                                    proc datasets library = &&NOM_LIB_ODS_C_&I..&k. ;
+                                        delete &&NOM_TAB_ODS_&I.. ;
+                                    run ;
+                                    quit ;
+
+                                %end ;
+                            %end ;
+                        %end ;
+                        /* NOMBRE D'OBSERVATIONS INSEREES */
+                        %LET DSID   = %sysfunc(OPEN(WORK._&&NOM_TAB_ODS_&I.,IN)) ;
+                        %LET NB_NEW_CLE&I = %sysfunc(ATTRN(&DSID,NOBS)) ;
+                        %if &DSID. > 0 %then %LET RC = %sysfunc(CLOSE(&DSID)) ;
+
+                        %let today_dttm= %sysfunc(datetime()) ;    %let today_dt  = %sysfunc(date()) ;
+                        %util_dec_aco_alim_suivi_trt(ID_TRT=&MV_ID_TRT., DAT_BATCH_TRT=&MV_DAT_BATCH_TRT., NOM_TRT="CHARGEMENT_ODS", DAT_REEL_TRT=&today_dttm., 
+                                                     MESG="La table %sysfunc(STRIP(&&NOM_TAB_TAMPON_&I.)) est charg� dans ODS : %sysfunc(STRIP(&&NB_NEW_CLE&I)) NOUVELLES CLES.", 
+                                                     CD_RETOUR=0) ;
+                        proc sql noprint ;
+
+                            update &lib_dec_aco_suivi..ACO_SUIVI_CHG_TAMPON_ODS
+                                    set FLG_TRAITE_ODS   = "O",
+                                        CD_STATUT_ODS    = "C",
+                                        DAT_REEL_TRT_ODS = &today_dttm.  
+                                    where ID_TRT            = &MV_ID_TRT.
+                                          and DAT_BATCH_TRT = &&MV_DAT_BATCH_TRT.
+                                          and ID_FIC        = "&&ID_FIC_&I." ;
+                        quit ;
+
+                        x "mv &&REF_FIC_ENT_&I./ok/&&NOM_FIC_&I &&REF_FIC_ENT_&I./archives/&&NOM_FIC_&I..&MV_EXTENSION." ;
+
+                        %if &SYSRC. = 0 %then %do ;
+                            %let today_dttm= %sysfunc(datetime()) ;    %let today_dt  = %sysfunc(date()) ;
+                            %util_dec_aco_alim_suivi_trt(ID_TRT=&MV_ID_TRT., DAT_BATCH_TRT=&MV_DAT_BATCH_TRT., NOM_TRT="CHARGEMENT_ODS", DAT_REEL_TRT=&today_dttm., 
+                                                         MESG="Le fichier %sysfunc(STRIP(&&NOM_FIC_&I.)) a �t� d�plac� dans le r�pertoire %sysfunc(STRIP(&&REF_FIC_ENT_&I./archives)).", 
+                                                         CD_RETOUR=0) ;
+                            x "zip &&REF_FIC_ENT_&I./archives/Archives_&MV_EXTENSION..zip &&REF_FIC_ENT_&I./archives/&&NOM_FIC_&I..&MV_EXTENSION. " ;
+
+                            %if &SYSRC. = 0 %then %do ;
+                                %let today_dttm= %sysfunc(datetime()) ;    %let today_dt  = %sysfunc(date()) ;
+                                %util_dec_aco_alim_suivi_trt(ID_TRT=&MV_ID_TRT., DAT_BATCH_TRT=&MV_DAT_BATCH_TRT., NOM_TRT="CHARGEMENT_ODS", DAT_REEL_TRT=&today_dttm., 
+                                                         MESG="Le fichier %sysfunc(STRIP(&&NOM_FIC_&I.)) a �t� ajout� � l'archive Archives_&MV_EXTENSION..zip.", 
+                                                         CD_RETOUR=0) ;
+
+                                x "rm &&REF_FIC_ENT_&I./archives/&&NOM_FIC_&I..&MV_EXTENSION." ;
+
+                            %end ;
+                            %else %do ;
+                                %let today_dttm= %sysfunc(datetime()) ;    %let today_dt  = %sysfunc(date()) ;
+                                %util_dec_aco_alim_suivi_trt(ID_TRT=&MV_ID_TRT., DAT_BATCH_TRT=&MV_DAT_BATCH_TRT., NOM_TRT="CHARGEMENT_ODS", DAT_REEL_TRT=&today_dttm., 
+                                                         MESG="Impossible d'ajouter le fichier %sysfunc(STRIP(&&NOM_FIC_&I.)) � l'archive Archives_&MV_EXTENSION..zip.", 
+                                                         CD_RETOUR=99) ;
+                            %end ;                            
+                        %end ;
+                        %else %do ;
+                            %let today_dttm= %sysfunc(datetime()) ;    %let today_dt  = %sysfunc(date()) ;
+                            %util_dec_aco_alim_suivi_trt(ID_TRT=&MV_ID_TRT., DAT_BATCH_TRT=&MV_DAT_BATCH_TRT., NOM_TRT="CHARGEMENT_ODS", DAT_REEL_TRT=&today_dttm., 
+                                                         MESG="Le fichier %sysfunc(STRIP(&&NOM_FIC_&I.)) n'a pas pu �tre d�plac� dans le r�pertoire %sysfunc(STRIP(&&REF_FIC_ENT_&I./archives)).", 
+                                                         CD_RETOUR=0) ;
+                        %end ;
+                    %end ;
+                    /*********/
+                    /* CAS 2 */
+                    /*********/
+                    /* SI LA TABLE ODS EST DEJA PRESENTE, ...                   */
+                    /* RECONSTITUTION TABLE COMPLETE : DONNEES CONF ET NON CONF */
+
+                    %else %do ;
+
+                        /* supression des colonnes avec FLG_ACTIF = N */
+                      /*  data _&&NOM_TAB_ODS_&I.    
+                             (drop=%do J=1 %to &NB_CHAMP. ; %if &&FLG_ACTIF_&J. = N %then %do ;  &&NOM_CHAMP_&J. %end ; %end ; ) ;
+                            set WORK._&&NOM_TAB_ODS_&I. ;
+                        run ;   */ 
+
+                        /* les donnees dej� presentes --> dans _ALL_DONNEES_&i. */
+                        /* balaye toutes les cl�s uniquement et trie selon la cl�  */
+                        proc sort data=&&NOM_LIB_ODS_&I...&&NOM_TAB_ODS_&I. ;
+                            by %do J=1 %to &NB_CHAMP. ; %if &&FLG_CLE_&J. = O %then %do ; &&NOM_CHAMP_&J. %end ; %end ; DAT_DEB_VAL DAT_FIN_VAL NUM_SEQ COD_ETA ;
+                        run ;
+                        /*---( Modif le 14/12/2017 : ajout d'un traitement de la table ayant uniquement la table ODS, non table ODS CONF)---*/
+                        %if "&&NOM_LIB_ODS_C_&i." ne ""  %then %do ;
+                            
+                            /* ajout : si la table existe dans les biblioth�ques confidentielles, on creer dans la work les tables en question pour le merge suivant */
+                            %do k = 1 %to 4 ;
+                                %if %sysfunc(EXIST(&&NOM_LIB_ODS_C_&I..&k..&&NOM_TAB_ODS_&I.)) = 1 %then %do ;
+                                    proc SORT DATA=&&NOM_LIB_ODS_C_&I..&k..&&NOM_TAB_ODS_&I. out=work.&&NOM_TAB_ODS_&I..&k. ;
+                                        by %do J=1 %to &NB_CHAMP. ; %if &&FLG_CLE_&J. = O %then %do ; &&NOM_CHAMP_&J. %end ; %end ; DAT_DEB_VAL DAT_FIN_VAL NUM_SEQ COD_ETA ;
+                                    run ;
+                                %end ;
+
+                            %end ;
+
+                            /* merge avec les tables g�n�r�es : on ne sait pas � l'avance combien, donc utilisation du ":" sur le suffixe &k. fabriqu� �tape avant */
+                            data WORK._ALL_DONNEES_&i. ;
+                                merge &&NOM_LIB_ODS_&I...&&NOM_TAB_ODS_&I.
+                                      &&NOM_TAB_ODS_&I.: ;
+                                by %do J=1 %to &NB_CHAMP. ; %if &&FLG_CLE_&J. = O %then %do ; &&NOM_CHAMP_&J. %end ; %end ; DAT_DEB_VAL DAT_FIN_VAL NUM_SEQ COD_ETA ;
+                        if COD_ETA = 1;/*12/11/2019*/                      
+                            run ;
+                        %end ;
+                        %else %do ;                                
+                            proc sort data= &&NOM_LIB_ODS_&I...&&NOM_TAB_ODS_&I. (where = (COD_ETA = 1)) out= WORK._ALL_DONNEES_&i. ;
+                                by %do J=1 %to &NB_CHAMP. ; %if &&FLG_CLE_&J. = O %then %do ; &&NOM_CHAMP_&J. %end ; %end ; DAT_DEB_VAL DAT_FIN_VAL NUM_SEQ COD_ETA ;
+                            run ;    
+                        %end ;
+                        
+                        /* LMA - conservation de la derni�re photo active - 12/11/2019 suppression du where remont� sur requete pr�c�dente pour optimisation*/
+                        /*data WORK._ALL_DONNEES_&i. ;
+                            set WORK._ALL_DONNEES_&i. (where = (COD_ETA = 1));
+                        run ;*/
+
+                        /* TRI DES DONNEES ISSUES DU TAMPON ET CONVERTIES AU BON FORMAT */
+                        proc SORT DATA=WORK._&&NOM_TAB_ODS_&I. ;
+                            by %do J=1 %to &NB_CHAMP. ; %if &&FLG_CLE_&J. = O %then %do ; &&NOM_CHAMP_&J. %end ; %end ; ;
+                        run ;
+                                    
+                        data WORK._NOUVELLES_CLES&I.
+                             (keep=%do J=1 %to &NB_CHAMP. ; %if &&FLG_CLE_&J. = O OR &&FLG_CONF_&J. = N or &&FLG_ALL_LIB_&J. = O %then %do ; &&NOM_CHAMP_&J. %end ; %end ;
+                                   DAT_TRT DAT_DEB_VAL DAT_FIN_VAL COD_ETA NUM_SEQ DAT_DERN_RECPT)
+                            
+                         %do k = 1 %to 4 ;
+                             WORK._NOUVELLES_CLES_CONF&I.&k.
+                             (keep=%do J=1 %to &NB_CHAMP. ; %if &&FLG_CLE_&J. = O OR &&FLG_ALL_LIB_&J. = O OR (&&FLG_CONF_&J. = O and &&NIV_CONF_&j. = &k.) %then %do ; &&NOM_CHAMP_&J. %end ; %end ;
+                                    DAT_TRT DAT_DEB_VAL DAT_FIN_VAL COD_ETA NUM_SEQ DAT_DERN_RECPT) 
+                         %end ;
+
+                         /*    WORK._NOUVELLES_CLES_CONF&I.
+                             (keep=%do J=1 %to &NB_CHAMP. ; %if &&FLG_CLE_&J. = O OR &&FLG_ALL_LIB_&J. = O OR &&FLG_CONF_&J. = O %then %do ;  &&NOM_CHAMP_&J. %end ; %end ;
+                                   DAT_TRT DAT_DEB_VAL DAT_FIN_VAL COD_ETA NUM_SEQ DAT_DERN_RECPT)*/
+
+                             WORK._ANCIENNES_CLES&I. ;
+
+                            merge WORK._ALL_DONNEES_&I. (in=B) WORK._&&NOM_TAB_ODS_&I. (in=A) ;
+                            by %do J=1 %to &NB_CHAMP. ; %if &&FLG_CLE_&J. = O %then %do ; &&NOM_CHAMP_&J. %end ; %end ; ;
+                            attrib DAT_TRT     length=8 format=datetime20. ;
+                            attrib DAT_DEB_VAL length=8 format=DDMMYY10. ;
+                            attrib DAT_FIN_VAL length=8 format=DDMMYY10. ;
+                            attrib COD_ETA     length=8 format=8. ;
+                            attrib NUM_SEQ     length=8 format=8. ;
+                            attrib DAT_DERN_RECPT length=8 format=DDMMYY10. ; /*20190909*/
+
+                            /* DAT_TRT = &MV_DAT_BATCH_TRT. ; */
+                            DAT_TRT = &today_dttm. ;
+                            /*20/02/2019 : ajout du cas GFP */
+                            %if "&&ID_SYS_GEST_&I."="GFP" %then %do;
+                               DAT_DEB_VAL = &MV_DAT_ARRETE_GFP.;
+                            %end;
+                            %else %if "&&ID_SYS_GEST_&I."="ALTO" %then %do;
+                               DAT_DEB_VAL = &DT_ARRETE_ALTO.;
+                            %end;
+                            %else %do;
+                               DAT_DEB_VAL = &MV_DAT_BATCH_TRT. ;
+                            %end;
+                            DAT_FIN_VAL = "31DEC9999"d ;
+                            COD_ETA = 1 ; 
+                            DAT_DERN_RECPT= DAT_DEB_VAL;/*20190909*/
+                           /* if A and not B then NUM_SEQ = NUM_SEQ ;
+                            else NUM_SEQ=. ;*/ /*20190909*/
+                            /* pas dans les anciennes = nouvelles donnees */
+                            if A and not B then do ;
+                                NUM_SEQ = 1;/* 20190909 */
+                                output _NOUVELLES_CLES&I. ;
+                                output _NOUVELLES_CLES_CONF&I.1 ;
+                                output _NOUVELLES_CLES_CONF&I.2 ;
+                                output _NOUVELLES_CLES_CONF&I.3 ;
+                                output _NOUVELLES_CLES_CONF&I.4 ;
+                            end ;
+                            /* les donnnes communes � updater */
+                            else if A and B then do ;
+                                NUM_SEQ=. ;
+                                output WORK._ANCIENNES_CLES&I. ;
+                            end ;
+                        run ;
+                        
+                        /* POUR AJOUTER */
+                        /* On r�cup�re la liste des variables s�par�es par des virgules pour faire le diff�rentiel */
+                        
+                        data WORK.NOM_COURT ;
+                            set S_DACPRM.ACO_TAB_ODS (where=(NOM_TAB_TAMPON="&&NOM_TAB_TAMPON_&i..")) end = fin ;
+                            if fin then call symputx("NOM_COURT&i", typ_structure_fic, "G") ;
+                        run ;
+                        
+                        data WORK.CLE ;
+                            set WORK.STRUCTURE_TABLE (where=(typ_structure_fic="&&NOM_COURT&i.." and flg_exclusion_diff='N')) end=fin ;
+                                length all_cle_comp_t $32767. ;
+                                retain all_cle_comp_t "" ;
+                                all_cle_comp_t=catx(",", all_cle_comp_t, nom_champ) ;
+                                if fin then call symputx("ALL_CLE_COMP_t", all_cle_comp_t, "G") ;
+                        run ;
+                        
+                        /* On r�cup�re la liste des variables cl�s s�par�es par des espaces */
+                        data WORK.CLE ;
+                            set WORK.STRUCTURE_TABLE (where=(typ_structure_fic="&&NOM_COURT&i.." and flg_cle='O')) end=fin ;
+                                length all_cle all_cle_virg all_cle_hash $32767 ;
+                                retain all_cle all_cle_virg all_cle_hash "" ;
+                                all_cle=catx(" ", all_cle, nom_champ) ;
+                                /*20190909*/
+                                all_cle_virg=catx(",", all_cle_virg, nom_champ) ;
+                                all_cle_hash=catx(" , ", all_cle_hash, '"'!!strip(nom_champ)!!'"') ;
+                                if fin then do; 
+                                   call symputx("ALL_CLE", all_cle, "G") ;
+                                   call symputx("ALL_CLE_VIRG", all_cle_virg, "G") ;
+                                   call symputx("ALL_CLE_HASH", all_cle_hash, "G") ;
+                                end;   
+                        run ;
+                        
+                        /* differentiel sur la selection de variables */
+                        /* r�cup�ration donc uniquement des lignes qui ont boug�es sur les variables s�lectionn�es */
+                        %put &ALL_CLE_COMP_t. ;
+
+                        proc sql ;
+                            create table WORK.DIFF_OLD_CLE_TO_INSERT&I AS
+                            select &ALL_CLE_COMP_t. from WORK._ANCIENNES_CLES&I
+                                except
+                            select &ALL_CLE_COMP_t. from WORK._ALL_DONNEES_&I 
+                            order by &all_cle_virg. ;/*20190909*/
+                        quit ;
+                        
+                        proc sort data=WORK._ANCIENNES_CLES&i ;
+                            by &all_cle. ;
+                        run ;
+
+                        /*20190909 proc sort data=WORK.DIFF_OLD_CLE_TO_INSERT&I ;
+                            by &all_cle. ;
+                        run ;*/
+                        
+                        /* ram�ne les infos suppl�mentaires et les variables supprim�es du diff�rentiel */
+                        data WORK._OLD_CLE_TO_INSERT&I WORK._MAJ_DATE_RECP&I (keep=&all_cle.); /*20190909*/
+                            merge WORK._ANCIENNES_CLES&i (in=a) WORK.DIFF_OLD_CLE_TO_INSERT&I (in=b keep=&all_cle. ) ;
+                            by &all_cle. ;
+                            if a and b then output WORK._OLD_CLE_TO_INSERT&I; 
+                            else if a and not b then output WORK._MAJ_DATE_RECP&I; /* 20190909 */
+                        run ;
+                        
+                        data WORK._OLD_CLE_TO_INSERT&I 
+                             (keep=%do J=1 %to &NB_CHAMP. ; %if &&FLG_CLE_&J. = O OR &&FLG_CONF_&J. = N or &&FLG_ALL_LIB_&J.=O %then %do ; &&NOM_CHAMP_&J. %end ; %end ;
+                                    DAT_TRT DAT_DEB_VAL DAT_FIN_VAL COD_ETA NUM_SEQ DAT_DERN_RECPT)
+
+                         %do k = 1 %to 4 ;
+                             WORK._OLD_CLE_TO_INSERT_CONF&I.&k.
+                             (keep=%do J=1 %to &NB_CHAMP. ; %if &&FLG_CLE_&J. = O or &&FLG_ALL_LIB_&J.=O or (&&FLG_CONF_&J. = O and &&NIV_CONF_&j. = &k.) %then %do ; &&NOM_CHAMP_&J. %end ; %end ;
+                                   DAT_TRT DAT_DEB_VAL DAT_FIN_VAL COD_ETA NUM_SEQ DAT_DERN_RECPT) 
+                         %end ; ;
+
+                            set WORK._OLD_CLE_TO_INSERT&I ;
+
+                            attrib DAT_TRT      length=8 format = datetime20. ;
+                            attrib DAT_DEB_VAL  length=8 format = DDMMYY10. ;
+                            attrib DAT_FIN_VAL  length=8 format = DDMMYY10. ;
+                            attrib COD_ETA      length=8 format = 8. ;
+                            attrib NUM_SEQ      length=8 format = 8. ;
+                            attrib DAT_DERN_RECPT length=8 format=DDMMYY10. ; /*20190909*/
+
+                            /*DAT_TRT = &MV_DAT_BATCH_TRT. ;*/
+                            DAT_TRT = &today_dttm. ;
+                            /*20/02/2019 : ajout du cas GFP */
+                            %if "&&ID_SYS_GEST_&I."="GFP" %then %do;
+                               DAT_DEB_VAL = &MV_DAT_ARRETE_GFP.;
+                            %end;
+                            %else %if "&&ID_SYS_GEST_&I."="ALTO" %then %do;
+                               DAT_DEB_VAL = &DT_ARRETE_ALTO.;
+                            %end;
+                            %else %do;
+                               DAT_DEB_VAL = &MV_DAT_BATCH_TRT. ;
+                            %end;
+                            DAT_FIN_VAL = "31DEC9999"d ;
+                            COD_ETA = 1 ; 
+                            DAT_DERN_RECPT=DAT_DEB_VAL; /*20190909*/
+                        run ;
+
+
+                        /* 20190909 - Cas sans modification de donn�es : maj de la date de r�ception */
+                        data &&NOM_LIB_ODS_&I...&&NOM_TAB_ODS_&I. (drop=rc);
+                           set &&NOM_LIB_ODS_&I...&&NOM_TAB_ODS_&I. end=eof;
+                           if _n_ = 1 then do ;
+                              declare hash h_dt_rcp ( dataset:"WORK._MAJ_DATE_RECP&I") ;
+                              h_dt_rcp.defineKey(&ALL_CLE_HASH.);
+                              h_dt_rcp.defineDone() ;
+                           end ;
+                           
+                           rc = h_dt_rcp.find();
+                           if rc=0 and COD_ETA=1 then do;
+                              %if "&&ID_SYS_GEST_&I."="GFP" %then %do; DAT_DERN_RECPT=&MV_DAT_ARRETE_GFP.;%end;
+                              %else %if "&&ID_SYS_GEST_&I."="ALTO" %then %do; DAT_DERN_RECPT=&DT_ARRETE_ALTO.;%end;
+                              %else %do; DAT_DERN_RECPT=&MV_DAT_BATCH_TRT.;%end;
+                           end;
+                           if eof then h_dt_rcp.delete();
+                        run;
+
+                        /* DONNEES NON CONF */
+                        proc append BASE=&&NOM_LIB_ODS_&I...&&NOM_TAB_ODS_&I. DATA=WORK._NOUVELLES_CLES&I ;
+                        run ;
+
+                        /* append des donn�es qui ont boug�es dans le diff�rentiel */
+                        proc append BASE=&&NOM_LIB_ODS_&I...&&NOM_TAB_ODS_&I. DATA=WORK._OLD_CLE_TO_INSERT&I ;
+                        run ;
+
+                        /* DONNEES CONF */
+                        /*---( Modif le 14/12/2017 : ajout d'un traitement de la table ayant uniquement la table ODS, non table ODS CONF)---*/
+                        %if "&&NOM_LIB_ODS_C_&i." ne ""  %then %do ;
+                            %do k = 1 %to 4 ;
+                                %if %sysfunc(EXIST(&&NOM_LIB_ODS_C_&I..&k..&&NOM_TAB_ODS_&I.)) = 1 %then %do ;
+                                    /* 20190909 - Conf - Cas sans modification de donn�es : maj de la date de r�ception */
+                                    data &&NOM_LIB_ODS_C_&I..&k..&&NOM_TAB_ODS_&I. (drop=rc);
+                                       set &&NOM_LIB_ODS_C_&I..&k..&&NOM_TAB_ODS_&I. end=eof;
+                                       if _n_ = 1 then do ;
+                                          declare hash h_dt_rcp ( dataset:"WORK._MAJ_DATE_RECP&I") ;
+                                          h_dt_rcp.defineKey(&ALL_CLE_HASH.);
+                                          h_dt_rcp.defineDone() ;
+                                       end ;
+                                       
+                                       rc = h_dt_rcp.find();
+                                       if rc=0 and COD_ETA=1 then do;
+                                          %if "&&ID_SYS_GEST_&I."="GFP" %then %do; DAT_DERN_RECPT=&MV_DAT_ARRETE_GFP.;%end;
+                                          %else %if "&&ID_SYS_GEST_&I."="ALTO" %then %do; DAT_DERN_RECPT=&DT_ARRETE_ALTO.;%end;
+                                          %else %do; DAT_DERN_RECPT=&MV_DAT_BATCH_TRT.;%end;
+                                       end;
+                                       if eof then h_dt_rcp.delete();
+                                    run;
+                                    proc append BASE=&&NOM_LIB_ODS_C_&I..&k..&&NOM_TAB_ODS_&I. DATA=WORK._NOUVELLES_CLES_CONF&I.&k. ;
+                                    run ;
+                                    proc append BASE=&&NOM_LIB_ODS_C_&I..&k..&&NOM_TAB_ODS_&I. DATA=WORK._OLD_CLE_TO_INSERT_CONF&I.&k. ;
+                                    run ;
+                                %end ;
+                            %end ;
+                        %end ;
+
+                        %do J=1 %to &NB_CHAMP. ;
+                            %let all_cle&I= ; 
+                            %put &&NOM_CHAMP_&J.  &&FLG_CLE_&J. ; 
+                            %if &&FLG_CLE_&J. = O %then %do ; 
+                                %let DERN_CLE&I= &&NOM_CHAMP_&J. ;    
+                            %end ; 
+                        %end ;
+                        
+                        /* MISE A JOUR NUM_SEQ, DAT_FIN_VAL, COD_ETA DANS LES DONNEES NON CONF  */
+                        proc sort data=&&NOM_LIB_ODS_&I...&&NOM_TAB_ODS_&I. ;
+                            by %do J=1 %to &NB_CHAMP. ; %if &&FLG_CLE_&J. = O %then %do ; &&NOM_CHAMP_&J. %end ; %end ; descending DAT_DEB_VAL ;
+                        run ;
+                        
+                        data &&NOM_LIB_ODS_&I...&&NOM_TAB_ODS_&I. (drop=DAT_FIN_VAL2) ;
+                            set &&NOM_LIB_ODS_&I...&&NOM_TAB_ODS_&I. ;
+                            by %do J=1 %to &NB_CHAMP. ; %if &&FLG_CLE_&J. = O %then %do ; &&NOM_CHAMP_&J. %end ; %end ; descending DAT_DEB_VAL ;
+                        
+                            /* ON RECUPERE LA DATE DE LA LIGNE PRECEDENTE - 1 JOUR */
+                            DAT_FIN_VAL2=LAG(DAT_DEB_VAL)-1 ;
+                            if FIRST.&&DERN_CLE&I. = 0  then do ; 
+                                if DAT_FIN_VAL="31DEC9999"d then DAT_FIN_VAL=DAT_FIN_VAL2 ;
+                            end ;
+                            
+                        run ;
+                        
+                        proc sort data= &&NOM_LIB_ODS_&I...&&NOM_TAB_ODS_&I. ;
+                            by %do J=1 %to &NB_CHAMP. ; %if &&FLG_CLE_&J. = O %then %do ; &&NOM_CHAMP_&J. %end ; %end ; DAT_DEB_VAL ;
+                        run ;
+                        
+                        data &&NOM_LIB_ODS_&I...&&NOM_TAB_ODS_&I. (DROP=NUM_SEQ2) ;
+                            set &&NOM_LIB_ODS_&I...&&NOM_TAB_ODS_&I. ;
+                            by %do J=1 %to &NB_CHAMP. ; %if &&FLG_CLE_&J. = O %then %do ; &&NOM_CHAMP_&J. %end ; %end ; DAT_DEB_VAL ;
+                            retain NUM_SEQ2 ;
+                        
+                            if FIRST.&&DERN_CLE&I. = 1 then NUM_SEQ2=1 ; 
+                            else num_seq2+1 ;
+                            if LAST.&&DERN_CLE&I. = 1 then COD_ETA=1 ;
+                            else COD_ETA=0 ;        
+                        
+                            NUM_SEQ=NUM_SEQ2 ;
+                        
+                        run ;
+                        
+                        /* MISE A JOUR NUM_SEQ, DAT_FIN_VAL, COD_ETA DANS LES DONNEES CONF  */
+                        /*---( Modif le 14/12/2017 : ajout d'un traitement de la table ayant uniquement la table ODS, non table ODS CONF)---*/
+                        
+                        %if "&&NOM_LIB_ODS_C_&i." ne ""  %then %do ;
+                            
+                            /* boucle sur les potentiels dataset avec donn�es confidentielles */
+                            %do k = 1 %to 4 ;
+                                %if %sysfunc(exist(&&NOM_LIB_ODS_C_&I..&k..&&NOM_TAB_ODS_&I.)) = 1 %then %do ;
+                                    proc sort data=&&NOM_LIB_ODS_C_&I..&k..&&NOM_TAB_ODS_&I. ;
+                                        by %do J=1 %to &NB_CHAMP. ; %if &&FLG_CLE_&J. = O %then %do ; &&NOM_CHAMP_&J. %end ; %end ; descending DAT_DEB_VAL ;
+                                    run ;
+                        
+                                    data &&NOM_LIB_ODS_C_&I..&k..&&NOM_TAB_ODS_&I. (DROP=DAT_FIN_VAL2) ;
+                                        set &&NOM_LIB_ODS_C_&I..&k..&&NOM_TAB_ODS_&I. ;
+                                        by %do J=1 %to &NB_CHAMP. ; %if &&FLG_CLE_&J. = O %then %do ; &&NOM_CHAMP_&J. %end ; %end ; descending DAT_DEB_VAL ;
+                                        /* ON RECUPERE LA DATE DE LA LIGNE PRECEDENTE - 1 JOUR */
+                                        DAT_FIN_VAL2=LAG(DAT_DEB_VAL)-1 ;
+                                        if first.&&DERN_CLE&I. = 0  then do ; 
+                                           if DAT_FIN_VAL="31DEC9999"d then DAT_FIN_VAL=DAT_FIN_VAL2 ;
+                                        end ;
+                                    run ;
+                        
+                                    proc sort data= &&NOM_LIB_ODS_C_&I..&k..&&NOM_TAB_ODS_&I. ;
+                                        by %do J=1 %to &NB_CHAMP. ; %if &&FLG_CLE_&J. = O %then %do ; &&NOM_CHAMP_&J. %end ; %end ; DAT_DEB_VAL ;
+                                    run ;
+                        
+                                    data &&NOM_LIB_ODS_C_&I..&k..&&NOM_TAB_ODS_&I. (drop=NUM_SEQ2) ;
+                                        set &&NOM_LIB_ODS_C_&I..&k..&&NOM_TAB_ODS_&I. ;
+                                            by %do J=1 %to &NB_CHAMP. ; %if &&FLG_CLE_&J. = O %then %do ; &&NOM_CHAMP_&J. %end ; %end ; DAT_DEB_VAL ;
+                                            retain NUM_SEQ2 ;
+                                            if FIRST.&&DERN_CLE&I. = 1 then NUM_SEQ2=1 ; 
+                                            else num_seq2+1 ;
+                                            if LAST.&&DERN_CLE&I. = 1 then COD_ETA=1 ;
+                                            else COD_ETA=0 ;        
+                                            NUM_SEQ=NUM_SEQ2 ;
+                                    run ;
+                        
+                                %end ;
+                            %end ;
+                        %end ;
+
+                        /* MAJ des variables exclues du diff�rentiel avec les derni�res valeurs */
+                        /* On construit des listes de variables avec et sans virgules pour les requ�tes */                        
+                        data WORK.NOM_COURT ;
+                            set S_DACPRM.ACO_TAB_ODS (where=(NOM_TAB_TAMPON="&&NOM_TAB_TAMPON_&i..")) end = fin ;
+                            if fin then call symputx("NOM_COURT&i", typ_structure_fic, "G") ;
+                        run ;
+                                                   
+                        data WORK.CLE ;
+                            set WORK.STRUCTURE_TABLE (where=(TYP_STRUCTURE_FIC="&&NOM_COURT&i..")) end=fin ;
+                            length all_cle_comp all_cle_amaj all_cle all_cle_s $32767. ;
+                            retain all_cle_comp "" all_cle_amaj "" all_cle ""  all_cle_s "" ;
+                            all_cle_comp=catx(",", all_cle_comp, nom_champ) ;
+                            if flg_exclusion_diff ='O' then all_cle_amaj=catx(",", all_cle_amaj, nom_champ) ;
+                            if flg_cle ='O' then do ; 
+                                all_cle=catx(",", all_cle, nom_champ) ;
+                                all_cle_s=catx(" ", all_cle_s, nom_champ) ;
+                            end ;
+                            if fin then do ;
+                                call symputx("ALL_CLE_COMP", all_cle_comp, "G") ;
+                                call symputx("ALL_CLE_AMAJ", all_cle_amaj, "G") ;
+                                call symputx("ALL_CLE", all_cle, "G") ;
+                                call symputx("ALL_CLE_s", all_cle_s, "G") ;
+                            end ;
+                        run ;
+                        
+                        %put %sysevalf(%sysfunc(length("&ALL_CLE_AMAJ."))*1) ;
+                        
+                        /* NOMBRE D'OBSERVATIONS INSEREES */
+                        %LET DSID   = %sysfunc(OPEN(_NOUVELLES_CLES&I.,IN)) ;
+                        %LET NB_NEW_CLE&I = %sysfunc(ATTRN(&DSID,NOBS)) ;
+                        %if &DSID. > 0 %then %LET RC = %sysfunc(CLOSE(&DSID)) ;
+                        %LET DSID   = %sysfunc(OPEN(_OLD_CLE_TO_INSERT&I.,IN)) ;
+                        %LET NB_OLD_CLE&I = %sysfunc(ATTRN(&DSID,NOBS)) ;
+                        %if &DSID. > 0 %then %LET RC = %sysfunc(CLOSE(&DSID)) ;
+
+                        %let today_dttm= %sysfunc(datetime()) ; %let today_dt  = %sysfunc(date()) ;
+                        %util_dec_aco_alim_suivi_trt(ID_TRT=&MV_ID_TRT., DAT_BATCH_TRT=&MV_DAT_BATCH_TRT., NOM_TRT="CHARGEMENT_ODS", DAT_REEL_TRT=&today_dttm., 
+                                                     MESG="La table %sysfunc(STRIP(&&NOM_TAB_TAMPON_&I.)) est charg� dans ODS : %sysfunc(STRIP(&&NB_NEW_CLE&I)) NOUVELLE(S) CLE(S) et %sysfunc(STRIP(&&NB_OLD_CLE&I)) MODIFICATION(S) CLES EXISTANTES.", 
+                                                     CD_RETOUR=0) ;
+                        x "mv &&REF_FIC_ENT_&I./ok/&&NOM_FIC_&I &&REF_FIC_ENT_&I./archives/&&NOM_FIC_&I..&MV_EXTENSION." ;
+                        %put ***info &SYSRC. ;
+                        %if &SYSRC. = 0 %then %do ;
+                            %let today_dttm= %sysfunc(datetime()) ;    %let today_dt  = %sysfunc(date()) ;
+                            %util_dec_aco_alim_suivi_trt(ID_TRT=&MV_ID_TRT., DAT_BATCH_TRT=&MV_DAT_BATCH_TRT., NOM_TRT="CHARGEMENT_ODS", DAT_REEL_TRT=&today_dttm., 
+                                                         MESG="Le fichier %sysfunc(STRIP(&&NOM_FIC_&I.)) a �t� d�plac� dans le r�pertoire %sysfunc(STRIP(&&REF_FIC_ENT_&I./archives)).", 
+                                                         CD_RETOUR=0) ;
+
+                            x "zip &&REF_FIC_ENT_&I./archives/Archives_&MV_EXTENSION..zip &&REF_FIC_ENT_&I./archives/&&NOM_FIC_&I..&MV_EXTENSION. " ;
+
+                            %if &SYSRC. = 0 %then %do ;
+                                %let today_dttm= %sysfunc(datetime()) ;    %let today_dt  = %sysfunc(date()) ;
+                                %util_dec_aco_alim_suivi_trt(ID_TRT=&MV_ID_TRT., DAT_BATCH_TRT=&MV_DAT_BATCH_TRT., NOM_TRT="CHARGEMENT_ODS", DAT_REEL_TRT=&today_dttm., 
+                                                         MESG="Le fichier %sysfunc(STRIP(&&NOM_FIC_&I.)) a �t� ajout� � l'archive Archives_&MV_EXTENSION..zip.", 
+                                                         CD_RETOUR=0) ;
+
+                                x "rm &&REF_FIC_ENT_&I./archives/&&NOM_FIC_&I..&MV_EXTENSION." ;
+
+
+                            %end ;
+                            %else %do ;
+                                %let today_dttm= %sysfunc(datetime()) ;    %let today_dt  = %sysfunc(date()) ;
+                                %util_dec_aco_alim_suivi_trt(ID_TRT=&MV_ID_TRT., DAT_BATCH_TRT=&MV_DAT_BATCH_TRT., NOM_TRT="CHARGEMENT_ODS", DAT_REEL_TRT=&today_dttm., 
+                                                         MESG="Impossible d'ajouter le fichier %sysfunc(STRIP(&&NOM_FIC_&I.)) � l'archive Archives_&MV_EXTENSION..zip.", 
+                                                         CD_RETOUR=99) ;
+
+                            %end ;
+
+                            proc sql noprint ;
+                                update &lib_dec_aco_suivi..ACO_SUIVI_CHG_TAMPON_ODS
+                                        set FLG_TRAITE_ODS   = "O",
+                                            CD_STATUT_ODS    = "C",
+                                            DAT_REEL_TRT_ODS = &today_dttm.  
+                                        where ID_TRT            = &MV_ID_TRT.
+                                              and DAT_BATCH_TRT = &&MV_DAT_BATCH_TRT.
+                                              and ID_FIC        = "&&ID_FIC_&I." ;
+                            quit ;
+                        %end ;
+                        %else %do ;
+                            %let today_dttm= %sysfunc(datetime()) ;    %let today_dt  = %sysfunc(date()) ;
+                            %util_dec_aco_alim_suivi_trt(ID_TRT=&MV_ID_TRT., DAT_BATCH_TRT=&MV_DAT_BATCH_TRT., NOM_TRT="CHARGEMENT_ODS", DAT_REEL_TRT=&today_dttm., 
+                                                         MESG="Le fichier %sysfunc(STRIP(&&NOM_FIC_&I.)) n'a pas pu �tre d�plac� dans le r�pertoire %sysfunc(STRIP(&&REF_FIC_ENT_&I./archives)).", 
+                                                         CD_RETOUR=0) ;
+                        %end ;
+                    %end ;
+                %end ;
+                %else %do ;
+                    /* SI DES ERREURS SONT DETECTEES, PAS DE CHARGEMENT => ALIMENTATION DE LA TABLE SUIVI_TRT */
+
+                    /* NOMBRE D'ERREURS DATE, CHAR, NUM, CLE */
+                    %LET DSID   = %sysfunc(OPEN(_ERR_DATE&I,IN)) ;
+                    %LET NB_ERR_DATE&I = %sysfunc(ATTRN(&DSID,NOBS)) ;
+                    %if &DSID. > 0 %then %LET RC = %sysfunc(CLOSE(&DSID)) ;
+                    %LET DSID   = %sysfunc(OPEN(_ERR_CHAR&I,IN)) ;
+                    %LET NB_ERR_CHAR&I = %sysfunc(ATTRN(&DSID,NOBS)) ;
+                    %if &DSID. > 0 %then %LET RC = %sysfunc(CLOSE(&DSID)) ;
+                    %LET DSID   = %sysfunc(OPEN(_ERR_NUM&I,IN)) ;
+                    %LET NB_ERR_NUM&I = %sysfunc(ATTRN(&DSID,NOBS)) ;
+                    %if &DSID. > 0 %then %LET RC = %sysfunc(CLOSE(&DSID)) ;
+                    %LET DSID   = %sysfunc(OPEN(_ERR_CLE&I,IN)) ;
+                    %LET NB_ERR_CLE&I = %sysfunc(ATTRN(&DSID,NOBS)) ;
+                    %if &DSID. > 0 %then %LET RC = %sysfunc(CLOSE(&DSID)) ;
+                    %let today_dttm= %sysfunc(datetime()) ;    %let today_dt  = %sysfunc(date()) ;
+                    %util_dec_aco_alim_suivi_trt(ID_TRT=&MV_ID_TRT., DAT_BATCH_TRT=&MV_DAT_BATCH_TRT., NOM_TRT="CHARGEMENT_ODS", DAT_REEL_TRT=&today_dttm., 
+                                                 MESG="La table %sysfunc(STRIP(&&NOM_TAB_TAMPON_&I.)) contient des erreurs : %sysfunc(STRIP(&&NB_ERR_DATE&I.)) Date(s), %sysfunc(STRIP(&&NB_ERR_CHAR&I.)) Char(s), %sysfunc(STRIP(&&NB_ERR_NUM&I.)) Num(s), %sysfunc(STRIP(&&NB_ERR_CLE&I.)) Cl�(s) : Pas de chargement.", 
+                                                 CD_RETOUR=99) ;
+
+                    x "mv &&REF_FIC_ENT_&I./ok/&&NOM_FIC_&I &&REF_FIC_KO_&I./&&NOM_FIC_&I..&MV_EXTENSION." ;
+                    %let today_dttm= %sysfunc(datetime()) ;    %let today_dt  = %sysfunc(date()) ;
+
+                    %if &SYSRC. = 0 %then %do ;
+                        %util_dec_aco_alim_suivi_trt(ID_TRT=&MV_ID_TRT., DAT_BATCH_TRT=&MV_DAT_BATCH_TRT., NOM_TRT="CHARGEMENT_ODS", DAT_REEL_TRT=&today_dttm., 
+                                                     MESG="Le fichier %sysfunc(STRIP(&&NOM_FIC_&I.)) a �t� d�plac� dans le r�pertoire %sysfunc(STRIP(&&REF_FIC_KO_&I.)).", 
+                                                     CD_RETOUR=99) ;
+                    %end ;
+                    %else %do ;
+                        %util_dec_aco_alim_suivi_trt(ID_TRT=&MV_ID_TRT., DAT_BATCH_TRT=&MV_DAT_BATCH_TRT., NOM_TRT="CHARGEMENT_ODS", DAT_REEL_TRT=&today_dttm., 
+                                                     MESG="Le fichier %sysfunc(STRIP(&&NOM_FIC_&I.)) n'a pas pu �tre d�plac� dans le r�pertoire %sysfunc(STRIP(&&REF_FIC_KO_&I.)).", 
+                                                     CD_RETOUR=99) ;
+                    %end ;
+                    proc sql noprint ;
+                        update &lib_dec_aco_suivi..ACO_SUIVI_CHG_TAMPON_ODS
+                        set CD_STATUT_ODS    = "E", /* ERREUR */
+                            DAT_REEL_TRT_ODS = &today_dttm. 
+                        where ID_TRT            = &MV_ID_TRT.
+                              and DAT_BATCH_TRT = &&MV_DAT_BATCH_TRT.
+                              and ID_FIC        = "&&ID_FIC_&I." ;
+                    quit ;
+
+                %end ;
+                
+            %end ; /* fin si des cl�s sont d�tect�es */
+
+/*              KFR Cas sans Cl� pour les fichiers de commissionnement             
+/*-------------------------------------- RAJOUT KFR --------------------------------*/
+/*       RAJOUT sp�cifique pour les tables commissions qui n'ont pas de cl�         */
+/*       Si pas de cl� generation d'une cl� pour import de la table                 */
+/*-------------------------------------- RAJOUT KFR --------------------------------*/
+
+
+		%else %if &&NB_CLE&I. = 0 and "&&ID_SYS_GEST_&I."="PDK_SIEG" %then %do ;
+
+                /* Generation d'une cl� dans la table tampon pour unicit� */
+
+			/*	proc metalib;
+					omr (library="Decisionnel ACO - TAMPON");
+					select ("CBA_COMM_CA" "CBA_COMM_FRAIS_GEST");
+           			update_rule=(delete);
+           			report;
+				run;*/
+                                 
+                /* table sans doublon */
+                /* ATTENTION, doit �tre supprim�es apr�s utilisation sinon pb avec "merge" */
+                proc SQL ;
+                   create table WORK.&&NOM_TAB_TAMPON_&I. AS 
+                   select *
+                      from &&NOM_LIB_TAMPON_&i...&&NOM_TAB_TAMPON_&I. t1
+                   group by catx('-',ID_LIGNE,DT_ARRETE)
+				   having count(catx('-',ID_LIGNE,DT_ARRETE))= 1;
+                quit ;
+                
+                /* table des doublons */
+                proc SQL ;
+                   create table WORK.DBL_&I. AS 
+                   select distinct *
+                      from &&NOM_LIB_TAMPON_&i...&&NOM_TAB_TAMPON_&I. t1
+                   group by catx('-',ID_LIGNE,DT_ARRETE)
+				   having count(catx('-',ID_LIGNE,DT_ARRETE))> 1;
+                quit ;
+
+                %LET DSID = %sysfunc(OPEN(WORK.DBL_&I.,IN)) ;
+                %LET NB_DOUBL&I = %sysfunc(ATTRN(&DSID,NOBS)) ;
+                %LET RC = %sysfunc(CLOSE(&DSID)) ;
+                %if &&NB_DOUBL&I. > 0 %then %do;
+                    %LET FLG_DBL=O ;
+                %end;
+
+		   /* SI PRESENCE DE DOUBLONS => ALIMENTATION DE LA TABLE SUIVI_DOUBLONS */
+                %if &&NB_DOUBL&I. > 0 %then %do ;
+                    %let today_dttm= %sysfunc(datetime()) ;
+                    proc sql noprint ;
+                        insert into &lib_dec_aco_suivi..ACO_SUIVI_DOUBLONS(ID_TRT, DAT_BATCH_TRT, DAT_REEL_TRT, TABLE, CLE, NB_DOUBLONS, NB_OBS_TABLE)
+                        values (&MV_ID_TRT., &MV_DAT_BATCH_TRT., &today_dttm., "&&NOM_TAB_TAMPON_&i..", "&ALL_CLE.", &&NB_DOUBL&I., &&NB_OBS&I.) ;
+                    quit ;
+
+                    /* NOMBRE DOUBLONS DANS LA TABLE TAMPON */
+                    %let today_dttm= %sysfunc(datetime()) ;
+                    %let today_dt  = %sysfunc(date()) ;
+                    %util_dec_aco_alim_suivi_trt(ID_TRT=&MV_ID_TRT., DAT_BATCH_TRT=&MV_DAT_BATCH_TRT., NOM_TRT="CHARGEMENT_ODS", DAT_REEL_TRT=&today_dttm., 
+                                                 MESG="La table %sysfunc(STRIP(&&NOM_TAB_TAMPON_&I.)) contient %sysfunc(STRIP(&&NB_DOUBL&I.)) doublons ", 
+                                                 CD_RETOUR=0) ;
+
+                %end ;
+
+               
+                data WORK._&&NOM_TAB_ODS_&I.(KEEP=%do J=1 %to &NB_CHAMP. ; &&NOM_CHAMP_&J. %end ;ID_LIGNE DT_ARRETE)
+                    WORK._ERREUR&I WORK._ERR_CHAR&I WORK._ERR_DATE&I WORK._ERR_NUM&I WORK._ERR_CLE&I ; /* Toutes les tables d'erreurs */
+
+                    set WORK.&&NOM_TAB_TAMPON_&I. (RENAME=(%do J=1 %to &NB_CHAMP. ; &&NOM_CHAMP_&J.=_&&NOM_CHAMP_&J. %end ;) )end=FIN ;
+
+                    %do J=1 %to &NB_CHAMP. ;
+                        attrib &&NOM_CHAMP_&J. length=&&length_&J format=&&format_&J. INformat=&&INFORMAT_&J. ;
+                        attrib ERR_&&NOM_CHAMP_&J. length=8 format=8. ;
+                  /* Modif 22/10/2019 */
+                  		%if "&&SYMBOL_MT_NEGATIF_&J." ^= "" %then %do ;
+                     		if substr(_&&NOM_CHAMP_&J., 1, length("&&SYMBOL_MT_NEGATIF_&J.")) = "&&SYMBOL_MT_NEGATIF_&J." then substr(_&&NOM_CHAMP_&J., 1, length("&&SYMBOL_MT_NEGATIF_&J.")) = '-' ;
+                     		else substr(_&&NOM_CHAMP_&J., 1, length("&&SYMBOL_MT_NEGATIF_&J.")) = '+' ;
+                            
+                            /* 26/02/2020 - Si le montant �tait vide alors on obtient un champ contenant uniquement le symbole + ou - */
+							if compress(_&&NOM_CHAMP_&J.) = '+' or compress(_&&NOM_CHAMP_&J.) = '-' then _&&NOM_CHAMP_&J. = '' ;
+							else _&&NOM_CHAMP_&J.=compress(_&&NOM_CHAMP_&J.) ;
+                   		%end ;
+					/* 04/03/2020 - Remplacement des valeurs par d�faut pour la dates */
+						%if &&TYP_CHAMP_&J.=D %then %do;
+							if _&&NOM_CHAMP_&J. = '00000000' then _&&NOM_CHAMP_&J. = '' ;
+						%end;
+                  /* Modif 04/12/2017 - */
+                        %if &&FMT_DECIMAL_&J. > 0 %then %do ;
+                            &&NOM_CHAMP_&J. = INPUT(_&&NOM_CHAMP_&J.,&&INFORMAT_&J.)/ &&FMT_DECIMAL_&J. ;
+                        %end ;
+                        %else %do ;
+                            &&NOM_CHAMP_&J. = INPUT(_&&NOM_CHAMP_&J.,&&INFORMAT_&J.) ;
+                        %end ;
+                    %end ;
+                    %do J=1 %to &NB_CHAMP. ; 
+                        %if &&FLG_CLE_&J. = O and &&TYP_CHAMP_&J.=N %then %do ; attrib ERR_CLE_N&&NOM_CHAMP_&J. length=8 format=8. ; %end ;
+                        %else %if &&FLG_CLE_&J. = O and &&TYP_CHAMP_&J.=C %then %do ; attrib ERR_CLE_C&&NOM_CHAMP_&J. length=8 format=8. ; %end ;
+                    %end ;
+
+                    %if &&NB_VAR_C&I. > 0 %then %do ;
+                        array A_CHAR_ORI(*)    %do J=1 %to &NB_CHAMP. ; %if &&TYP_CHAMP_&J.=C %then %do ; _&&NOM_CHAMP_&J.      %end ; %end ; ; /* Toutes les var char origine */
+                        array A_CHAR_FIN(*)    %do J=1 %to &NB_CHAMP. ; %if &&TYP_CHAMP_&J.=C %then %do ;  &&NOM_CHAMP_&J.      %end ; %end ; ; /* Toutes les var char cible   */
+                        array A_CHAR_ERR(*)    %do J=1 %to &NB_CHAMP. ; %if &&TYP_CHAMP_&J.=C %then %do ; ERR_&&NOM_CHAMP_&J. %end ; %end ; ; /* Identification de chaque erreur char*/
+                    %end ;
+                    
+                    if ALL_ERR_CHAR  > 0 then output WORK._ERR_CHAR&I ;
+                    if ALL_ERR_DATE  > 0 then output WORK._ERR_DATE&I ;
+                    if ALL_ERR_NUM   > 0 then output WORK._ERR_NUM&I ;
+				
+                    if (ALL_CLE_N_ERR > 0 OR ALL_CLE_C_ERR > 0) and "&NOM_TAB_TAMPON_&I." =: "PDK_" then output WORK._ERR_CLE&I ;
+				
+                    if (ALL_ERR_CHAR > 0 OR ALL_ERR_DATE > 0 OR ALL_ERR_NUM > 0 OR ALL_CLE_C_ERR > 0 OR ALL_CLE_N_ERR > 0) and "&NOM_TAB_TAMPON_&I." =: "PDK_" then output WORK._ERREUR&I ;
+                    else output WORK._&&NOM_TAB_ODS_&I. ;
+                   
+                run ;
+
+                /* NOMBRE D'OBSERVATIONS DE LA TABLE _ERREUR */
+                %LET DSID   = %sysfunc(OPEN(_ERREUR&I.,IN)) ;
+                %LET NB_ERR&I. = %sysfunc(ATTRN(&DSID.,NOBS)) ;
+                %if &DSID. > 0 %then %LET RC = %sysfunc(CLOSE(&DSID.)) ;
+
+                /* SI AUCUNE ERREUR DETECTE, CHARGEMENT DANS ODS  */
+                %if &&NB_ERR&I. = 0 %then %do ;
+
+                    %put ----TABLE &&NOM_LIB_ODS_&I...&&NOM_TAB_ODS_&I. EXISTE ? : %sysfunc(EXIST(&&NOM_LIB_ODS_&I...&&NOM_TAB_ODS_&I.))---- ;
+
+                    /* On supprime les tables temporaires qui ont servi � la g�n�ration de tables avec et sans doublons */
+                    /* Sinon adh�rence avec le merge sur &&NOM_TAB_ODS_&I.: */
+
+					proc datasets lib=work memtype=data ;
+                        delete &&NOM_TAB_TAMPON_&I. ;
+                    run ;
+
+                    /*********/
+                    /* CAS 1 */ 
+                    /*********/
+                    /* SI LA TABLE ODS EST ABSENTE, TABLE ODS = TABLE WORK._&&NOM_TAB_ODS_&I. : CREATION */
+                    %if %sysfunc(EXIST(&&NOM_LIB_ODS_&I...&&NOM_TAB_ODS_&I.)) = 0 %then %do ;
+
+                        data &&NOM_LIB_ODS_&I...&&NOM_TAB_ODS_&I.   
+                                (keep=%do J=1 %to &NB_CHAMP. ; %if &&FLG_CLE_&J. = O OR &&FLG_CONF_&J. = N or &&FLG_ALL_LIB_&J. = O %then %do ;  &&NOM_CHAMP_&J. %end ; %end ;
+                                         ID_LIGNE DT_ARRETE DAT_TRT DAT_DEB_VAL DAT_FIN_VAL COD_ETA NUM_SEQ DAT_DERN_RECPT );
+                          
+                            set WORK._&&NOM_TAB_ODS_&I. ;
+							attrib ID_LIGNE		   length=8 format=8.;
+							attrib DT_ARRETE 	   length=8 format= DATE9.;
+                            attrib DAT_TRT         length=8 /*format=DDMMYY10.*/ format=datetime20. ;
+                            attrib DAT_DEB_VAL     length=8 format=DDMMYY10. ;
+                            attrib DAT_FIN_VAL     length=8 format=DDMMYY10. ;
+                            attrib COD_ETA         length=8 format=8. ;
+                            attrib NUM_SEQ         length=8 format=8. ;
+                            attrib DAT_DERN_RECPT  length=8 format=DDMMYY10. ; /*20190909*/
+
+							ID_LIGNE = _N_ ;
+							DT_ARRETE = intnx('month', &MV_DAT_BATCH_TRT., -1, 'end');
+
+							
+                            DAT_TRT = &today_dttm. ;
+							
+                            /*20/02/2019 : ajout du cas GFP */
+                            %if "&&ID_SYS_GEST_&I."="GFP" %then %do;
+                               DAT_DEB_VAL = &MV_DAT_ARRETE_GFP.;
+                            %end;
+                            %else %do;
+                               DAT_DEB_VAL = &MV_DAT_BATCH_TRT. ;
+                            %end;
+                            DAT_FIN_VAL = "31DEC9999"d ;
+                            COD_ETA = 1 ; 
+                            NUM_SEQ = 1 ;
+                            DAT_DERN_RECPT=DAT_DEB_VAL;/*20190909*/
+                        run ;
+
+                        /* AJOUT 12/02/18 : si pas de donn�es dans la table, on la supprime / ce cas arrive quand pas de donn�e confidentielle associ�e � NIV_CONF */
+                        %if "&&NOM_LIB_ODS_C_&i." ne ""  %then %do ;
+
+                            /* Taille de cl� est = 1 soit la variable _N_ rajout� */
+                           
+							%let SIZE_CLE = 2; /* Correspond � l'ID_LIGNE + DT_ARRETE */
+
+                            /* +6 car 6 est le nombre de cl� DAT_TRT DAT_DEB_VAL DAT_FIN_VAL COD_ETA NUM_SEQ DAT_DERN_RECPT + nombre de cl� "O" */
+                            %let SIZE_MIN_BASE = %sysevalf(&SIZE_CLE + 6) ;
+                        
+                            %do k = 1 %to 4 ;
+                                
+                                /* CBO - Modification : mani�re de calculer le nombre de colonne */
+                                data _NULL_ ;
+                                    dsid = open("&&NOM_LIB_ODS_C_&I..&k..&&NOM_TAB_ODS_&I..") ;                
+                                    vars = attrn(dsid,"NVARS") ;
+                                    call symputx("NB_COL_TABLi_&k",vars) ;
+                                    rc = close(dsid) ;
+                                run ;
+
+                               
+
+                                %if &&NB_COL_TABLi_&k. = &SIZE_MIN_BASE %then %do ;
+
+                                    %put la table &&NOM_LIB_ODS_C_&I..&k..&&NOM_TAB_ODS_&I.. est supprimee car elle ne contient pas de donnees ;
+
+                                    proc datasets library = &&NOM_LIB_ODS_C_&I..&k. ;
+                                        delete &&NOM_TAB_ODS_&I.. ;
+                                    run ;
+                                    quit ;
+
+                                %end ;
+                            %end ;
+                        %end ;
+
+                        /* NOMBRE D'OBSERVATIONS INSEREES */
+                        %LET DSID   = %sysfunc(OPEN(WORK._&&NOM_TAB_ODS_&I.,IN)) ;
+                        %LET NB_NEW_CLE&I = %sysfunc(ATTRN(&DSID,NOBS)) ;
+                        %if &DSID. > 0 %then %LET RC = %sysfunc(CLOSE(&DSID)) ;
+
+                        %let today_dttm= %sysfunc(datetime()) ;    %let today_dt  = %sysfunc(date()) ;
+                        %util_dec_aco_alim_suivi_trt(ID_TRT=&MV_ID_TRT., DAT_BATCH_TRT=&MV_DAT_BATCH_TRT., NOM_TRT="CHARGEMENT_ODS", DAT_REEL_TRT=&today_dttm., 
+                                                     MESG="La table %sysfunc(STRIP(&&NOM_TAB_TAMPON_&I.)) est charg� dans ODS : %sysfunc(STRIP(&&NB_NEW_CLE&I)) NOUVELLES CLES.", 
+                                                     CD_RETOUR=0) ;
+
+                        proc sql noprint ;
+                            update &lib_dec_aco_suivi..ACO_SUIVI_CHG_TAMPON_ODS
+                                    set FLG_TRAITE_ODS   = "O",
+                                        CD_STATUT_ODS    = "C",
+                                        DAT_REEL_TRT_ODS = &today_dttm.  
+                                    where ID_TRT            = &MV_ID_TRT.
+                                          and DAT_BATCH_TRT = &&MV_DAT_BATCH_TRT.
+                                          and ID_FIC        = "&&ID_FIC_&I." ;
+                        quit ;
+
+                        x "mv &&REF_FIC_ENT_&I./ok/&&NOM_FIC_&I &&REF_FIC_ENT_&I./archives/&&NOM_FIC_&I..&MV_EXTENSION." ;
+
+                        %if &SYSRC. = 0 %then %do ;
+                            %let today_dttm= %sysfunc(datetime()) ;    %let today_dt  = %sysfunc(date()) ;
+                            %util_dec_aco_alim_suivi_trt(ID_TRT=&MV_ID_TRT., DAT_BATCH_TRT=&MV_DAT_BATCH_TRT., NOM_TRT="CHARGEMENT_ODS", DAT_REEL_TRT=&today_dttm., 
+                                                         MESG="Le fichier %sysfunc(STRIP(&&NOM_FIC_&I.)) a �t� d�plac� dans le r�pertoire %sysfunc(STRIP(&&REF_FIC_ENT_&I./archives)).", 
+                                                         CD_RETOUR=0) ;
+                            x "zip &&REF_FIC_ENT_&I./archives/Archives_&MV_EXTENSION..zip &&REF_FIC_ENT_&I./archives/&&NOM_FIC_&I..&MV_EXTENSION. " ;
+
+                            %if &SYSRC. = 0 %then %do ;
+                                %let today_dttm= %sysfunc(datetime()) ;    %let today_dt  = %sysfunc(date()) ;
+                                %util_dec_aco_alim_suivi_trt(ID_TRT=&MV_ID_TRT., DAT_BATCH_TRT=&MV_DAT_BATCH_TRT., NOM_TRT="CHARGEMENT_ODS", DAT_REEL_TRT=&today_dttm., 
+                                                         MESG="Le fichier %sysfunc(STRIP(&&NOM_FIC_&I.)) a �t� ajout� � l'archive Archives_&MV_EXTENSION..zip.", 
+                                                         CD_RETOUR=0) ;
+
+                                x "rm &&REF_FIC_ENT_&I./archives/&&NOM_FIC_&I..&MV_EXTENSION." ;
+
+                            %end ;
+                            %else %do ;
+                                %let today_dttm= %sysfunc(datetime()) ;    %let today_dt  = %sysfunc(date()) ;
+                                %util_dec_aco_alim_suivi_trt(ID_TRT=&MV_ID_TRT., DAT_BATCH_TRT=&MV_DAT_BATCH_TRT., NOM_TRT="CHARGEMENT_ODS", DAT_REEL_TRT=&today_dttm., 
+                                                         MESG="Impossible d'ajouter le fichier %sysfunc(STRIP(&&NOM_FIC_&I.)) � l'archive Archives_&MV_EXTENSION..zip.", 
+                                                         CD_RETOUR=99) ;
+                            %end ;                            
+                        %end ;
+
+                        %else %do ;
+                            %let today_dttm= %sysfunc(datetime()) ;    %let today_dt  = %sysfunc(date()) ;
+                            %util_dec_aco_alim_suivi_trt(ID_TRT=&MV_ID_TRT., DAT_BATCH_TRT=&MV_DAT_BATCH_TRT., NOM_TRT="CHARGEMENT_ODS", DAT_REEL_TRT=&today_dttm., 
+                                                         MESG="Le fichier %sysfunc(STRIP(&&NOM_FIC_&I.)) n'a pas pu �tre d�plac� dans le r�pertoire %sysfunc(STRIP(&&REF_FIC_ENT_&I./archives)).", 
+                                                         CD_RETOUR=0) ;
+                        %end ;
+                    %end ;
+
+                    /*********/
+                    /* CAS 2 */
+                    /*********/
+                    /* SI LA TABLE ODS EST DEJA PRESENTE, ...                   */
+                    /* RECONSTITUTION TABLE COMPLETE : DONNEES NON CONF */
+
+                    %else %do ;
+
+
+                        /* les donnees dej� presentes --> dans _ALL_DONNEES_&i. */
+                        /* balaye toutes les cl�s uniquement et trie selon la cl�  */
+                        proc sort data=&&NOM_LIB_ODS_&I...&&NOM_TAB_ODS_&I. ;
+                            by ID_LIGNE DT_ARRETE DAT_DEB_VAL DAT_FIN_VAL NUM_SEQ COD_ETA ;
+                        run ;
+
+                                                       
+                        proc sort data= &&NOM_LIB_ODS_&I...&&NOM_TAB_ODS_&I. (where = (COD_ETA = 1)) out= WORK._ALL_DONNEES_&i. ;
+                          by %do J=1 %to &NB_CHAMP. ; %if &&FLG_CLE_&J. = O %then %do ; &&NOM_CHAMP_&J. %end ; %end ; ID_LIGNE DT_ARRETE DAT_DEB_VAL DAT_FIN_VAL NUM_SEQ COD_ETA ;
+                        run ;    
+                       
+
+                        /* TRI DES DONNEES ISSUES DU TAMPON ET CONVERTIES AU BON FORMAT */
+                        proc SORT DATA=WORK._&&NOM_TAB_ODS_&I. ;
+                            by ID_LIGNE DT_ARRETE;
+                        run ;
+
+						data WORK._NOUVELLES_CLES&I.
+                             (keep=%do J=1 %to &NB_CHAMP. ; %if &&FLG_CLE_&J. = O OR &&FLG_CONF_&J. = N or &&FLG_ALL_LIB_&J. = O %then %do ; &&NOM_CHAMP_&J. %end ; %end ;
+                                   ID_LIGNE DT_ARRETE DAT_TRT DAT_DEB_VAL DAT_FIN_VAL COD_ETA NUM_SEQ DAT_DERN_RECPT)
+                            
+                                    
+                        %do k = 1 %to 4 ;
+                             WORK._NOUVELLES_CLES_CONF&I.&k.
+                             (keep=%do J=1 %to &NB_CHAMP. ; %if &&FLG_CLE_&J. = O OR &&FLG_ALL_LIB_&J. = O OR (&&FLG_CONF_&J. = O and &&NIV_CONF_&j. = &k.) %then %do ; &&NOM_CHAMP_&J. %end ; %end ;
+                                    ID_LIGNE DT_ARRETE DAT_TRT DAT_DEB_VAL DAT_FIN_VAL COD_ETA NUM_SEQ DAT_DERN_RECPT) 
+                         %end ;
+                      
+                             WORK._ANCIENNES_CLES&I. ;
+
+                            merge WORK._ALL_DONNEES_&I. (in=B) WORK._&&NOM_TAB_ODS_&I. (in=A) ;
+                            by ID_LIGNE DT_ARRETE;
+                            attrib DAT_TRT     length=8 format=datetime20. ;
+                            attrib DAT_DEB_VAL length=8 format=DDMMYY10. ;
+                            attrib DAT_FIN_VAL length=8 format=DDMMYY10. ;
+                            attrib COD_ETA     length=8 format=8. ;
+                            attrib NUM_SEQ     length=8 format=8. ;
+                            attrib DAT_DERN_RECPT length=8 format=DDMMYY10. ; 
+
+                            /* DAT_TRT = &MV_DAT_BATCH_TRT. ; */
+                            DAT_TRT = &today_dttm. ;
+                            /*20/02/2019 : ajout du cas GFP */
+                            %if "&&ID_SYS_GEST_&I."="GFP" %then %do;
+                               DAT_DEB_VAL = &MV_DAT_ARRETE_GFP.;
+                            %end;
+                            %else %do;
+                               DAT_DEB_VAL = &MV_DAT_BATCH_TRT. ;
+                            %end;
+                            DAT_FIN_VAL = "31DEC9999"d ;
+                            %if DT_ARRETE = %SYSFUNC(intnx('month', &MV_DAT_BATCH_TRT., -1, 'end')) %then %do;
+								COD_ETA = 1 ;
+							%end; 
+							%else %do; 
+								COD_ETA = 0;
+							%end; 
+                            DAT_DERN_RECPT= DAT_DEB_VAL;
+                           
+                            /* pas dans les anciennes = nouvelles donnees */
+                            if A and not B then do ;
+                                NUM_SEQ = 1;
+                                output _NOUVELLES_CLES&I. ;
+                               
+                            end ;
+                            /* les donnnes communes � updater */
+                            else if A and B then do ;
+                                NUM_SEQ=. ;
+                                output WORK._ANCIENNES_CLES&I. ;
+                            end ;
+                        run ;                                                                
+                        
+						/* POUR AJOUTER */
+                        /* On r�cup�re la liste des variables s�par�es par des virgules pour faire le diff�rentiel */
+                        
+                        data WORK.NOM_COURT ;
+                            set S_DACPRM.ACO_TAB_ODS (where=(NOM_TAB_TAMPON="&&NOM_TAB_TAMPON_&i..")) end = fin ;
+                            if fin then call symputx("NOM_COURT&i", typ_structure_fic, "G") ;
+                        run ;
+                        
+                        data WORK.CLE ;
+                            set WORK.STRUCTURE_TABLE (where=(typ_structure_fic="&&NOM_COURT&i.." and flg_exclusion_diff='N')) end=fin ;
+                                length all_cle_comp_t $32767. ;
+                                retain all_cle_comp_t "" ;
+                                all_cle_comp_t=catx(",", all_cle_comp_t, nom_champ) ;
+                                if fin then call symputx("ALL_CLE_COMP_t", all_cle_comp_t, "G") ;
+                        run ;
+                        
+                        
+                       
+                        /* r�cup�ration donc uniquement des lignes qui ont boug�es sur les variables s�lectionn�es */
+                        %put &ALL_CLE_COMP_t. ;
+
+                        proc sql ;
+                            create table WORK.DIFF_OLD_CLE_TO_INSERT&I AS
+                            select &ALL_CLE_COMP_t., ID_LIGNE, DT_ARRETE from WORK._ANCIENNES_CLES&I
+                                except
+                            select &ALL_CLE_COMP_t., ID_LIGNE, DT_ARRETE from WORK._ALL_DONNEES_&I ;
+                        quit ;
+                        
+                        proc sort data=WORK._ANCIENNES_CLES&i. ;
+                            by ID_LIGNE DT_ARRETE ;
+                        run ;
+
+						proc sort data=WORK.DIFF_OLD_CLE_TO_INSERT&I. ;
+							by ID_LIGNE DT_ARRETE; 
+						run;
+
+                        
+                        
+                        /* ram�ne les infos suppl�mentaires et les variables supprim�es du diff�rentiel */
+                        data WORK._OLD_CLE_TO_INSERT&I. WORK._MAJ_DATE_RECP&I. (keep=ID_LIGNE DT_ARRETE); 
+                            merge WORK._ANCIENNES_CLES&i. (in=a) WORK.DIFF_OLD_CLE_TO_INSERT&I. (in=b keep=ID_LIGNE DT_ARRETE) ;
+                            by ID_LIGNE DT_ARRETE ;
+                            if a and b then output WORK._OLD_CLE_TO_INSERT&I.; 
+                            else if a and not b then output WORK._MAJ_DATE_RECP&I.; 
+                        run ;
+                        
+                        data WORK._OLD_CLE_TO_INSERT&I 
+                             (keep= %do J=1 %to &NB_CHAMP. ; %if &&FLG_CLE_&J. = O OR &&FLG_CONF_&J. = N or &&FLG_ALL_LIB_&J. = O %then %do ; &&NOM_CHAMP_&J. %end ; %end ;
+								ID_LIGNE DT_ARRETE DAT_TRT DAT_DEB_VAL DAT_FIN_VAL COD_ETA NUM_SEQ DAT_DERN_RECPT);
+
+                            set WORK._OLD_CLE_TO_INSERT&I ;
+
+							attrib ID_LIGNE     length=8 format= 8.;
+							attrib DT_ARRETE  	length=8 format= DATE9.;
+							attrib DAT_TRT      length=8 format = datetime20. ;
+                            attrib DAT_DEB_VAL  length=8 format = DDMMYY10. ;
+                            attrib DAT_FIN_VAL  length=8 format = DDMMYY10. ;
+                            attrib COD_ETA      length=8 format = 8. ;
+                            attrib NUM_SEQ      length=8 format = 8. ;
+                            attrib DAT_DERN_RECPT length=8 format=DDMMYY10. ; /*20190909*/
+
+							ID_LIGNE = _N_;
+							DT_ARRETE = put(intnx('month', &MV_DAT_BATCH_TRT., -1, 'end'),date9.);	
+
+							/*DAT_TRT = &MV_DAT_BATCH_TRT. ;*/
+                            DAT_TRT = &today_dttm. ;
+                            /*20/02/2019 : ajout du cas GFP */
+                            %if "&&ID_SYS_GEST_&I."="GFP" %then %do;
+                               DAT_DEB_VAL = &MV_DAT_ARRETE_GFP.;
+                            %end;
+                            %else %do;
+                               DAT_DEB_VAL = &MV_DAT_BATCH_TRT. ;
+                            %end;
+                            DAT_FIN_VAL = "31DEC9999"d ;
+                            %if DT_ARRETE = %SYSFUNC(intnx('month', &MV_DAT_BATCH_TRT., -1, 'end')) %then %do;
+								COD_ETA = 1 ;
+							%end; 
+							%else %do; 
+								COD_ETA = 0;
+							%end; 
+                            DAT_DERN_RECPT=DAT_DEB_VAL; /*20190909*/
+                        run ;
+
+                        /* DONNEES NON CONF */
+                        proc append BASE=&&NOM_LIB_ODS_&I...&&NOM_TAB_ODS_&I. DATA=WORK._NOUVELLES_CLES&I ;
+                        run ;
+
+                        /* append des donn�es qui ont boug�es dans le diff�rentiel */
+                        proc append BASE=&&NOM_LIB_ODS_&I...&&NOM_TAB_ODS_&I. DATA=WORK._OLD_CLE_TO_INSERT&I ;
+                        run ;
+
+
+                        /* MISE A JOUR NUM_SEQ, DAT_FIN_VAL, COD_ETA DANS LES DONNEES NON CONF  */
+
+
+					   proc sort data=&&NOM_LIB_ODS_&I...&&NOM_TAB_ODS_&I. ;
+                            by ID_LIGNE DT_ARRETE descending DAT_DEB_VAL ;
+                        run ;
+                        
+                        data &&NOM_LIB_ODS_&I...&&NOM_TAB_ODS_&I. (drop=DAT_FIN_VAL2) ;
+                            set &&NOM_LIB_ODS_&I...&&NOM_TAB_ODS_&I. ;
+                            by ID_LIGNE DT_ARRETE descending DAT_DEB_VAL ;
+                        
+                            /* ON RECUPERE LA DATE DE LA LIGNE PRECEDENTE - 1 JOUR */
+                            DAT_FIN_VAL2=LAG(DAT_DEB_VAL)-1 ;
+                            if FIRST.DT_ARRETE = 0  then do ; /*Pas de cl� */  
+                                if DAT_FIN_VAL="31DEC9999"d then DAT_FIN_VAL=DAT_FIN_VAL2 ;
+                            end ;
+                            
+                        run ;
+                        
+                        proc sort data= &&NOM_LIB_ODS_&I...&&NOM_TAB_ODS_&I. ;
+                            by ID_LIGNE DT_ARRETE DAT_DEB_VAL ;
+                        run ;
+                        
+                        data &&NOM_LIB_ODS_&I...&&NOM_TAB_ODS_&I. (DROP=NUM_SEQ2) ;
+                            set &&NOM_LIB_ODS_&I...&&NOM_TAB_ODS_&I. ;
+                            by ID_LIGNE DT_ARRETE DAT_DEB_VAL ;
+                            retain NUM_SEQ2 ;
+                        
+                            if FIRST.DT_ARRETE = 1 then NUM_SEQ2=1 ; 
+                            else num_seq2+1 ;
+                            /*if DT_ARRETE =(intnx('month', &MV_DAT_BATCH_TRT., -1, 'end')) then COD_ETA=1 ;*/ /* Pas de cl� */
+                            /*else COD_ETA=0 ;*//* KFR Correctif r�alis� le 22/10/2025*/
+							COD_ETA = 1 ; /* COD-ETA �  - Il s'agit de donn�e de flux */
+                            NUM_SEQ=NUM_SEQ2 ;
+                        
+                        run ;
+                         /*	%end;
+						%end; 
+					%end; */
+
+                        /* MAJ des variables exclues du diff�rentiel avec les derni�res valeurs */
+                        /* On construit des listes de variables avec et sans virgules pour les requ�tes */ 
+ 
+                        data WORK.NOM_COURT ;
+                            set S_DACPRM.ACO_TAB_ODS (where=(NOM_TAB_TAMPON="&&NOM_TAB_TAMPON_&i..")) end = fin ;
+                            if fin then call symputx("NOM_COURT&i", typ_structure_fic, "G") ;
+                        run ;
+                                                   
+                        data WORK.CLE ;
+                            set WORK.STRUCTURE_TABLE (where=(TYP_STRUCTURE_FIC="&&NOM_COURT&i..")) end=fin ;
+                            length all_cle_comp all_cle_amaj all_cle all_cle_s $32767. ;
+                            retain all_cle_comp "" all_cle_amaj "" all_cle ""  all_cle_s "" ;
+                            all_cle_comp=catx(",", all_cle_comp, nom_champ) ;
+                            if flg_exclusion_diff ='O' then all_cle_amaj=catx(",", all_cle_amaj, nom_champ) ;
+                            if flg_cle ='O' then do ; 
+                                all_cle=catx(",", all_cle, nom_champ) ;
+                                all_cle_s=catx(" ", all_cle_s, nom_champ) ;
+                            end ;
+                            if fin then do ;
+                                call symputx("ALL_CLE_COMP", all_cle_comp, "G") ;
+                                call symputx("ALL_CLE_AMAJ", all_cle_amaj, "G") ;
+                                call symputx("ALL_CLE", all_cle, "G") ;
+                                call symputx("ALL_CLE_s", all_cle_s, "G") ;
+                            end ;
+                        run ;
+                        
+                        %put %sysevalf(%sysfunc(length("&ALL_CLE_AMAJ."))*1) ;
+                        
+                        /* NOMBRE D'OBSERVATIONS INSEREES */
+                        %LET DSID   = %sysfunc(OPEN(_NOUVELLES_CLES&I.,IN)) ;
+                        %LET NB_NEW_CLE&I = %sysfunc(ATTRN(&DSID,NOBS)) ;
+                        %if &DSID. > 0 %then %LET RC = %sysfunc(CLOSE(&DSID)) ;
+                        %LET DSID   = %sysfunc(OPEN(_OLD_CLE_TO_INSERT&I.,IN)) ;
+                        %LET NB_OLD_CLE&I = %sysfunc(ATTRN(&DSID,NOBS)) ;
+                        %if &DSID. > 0 %then %LET RC = %sysfunc(CLOSE(&DSID)) ;
+
+                        %let today_dttm= %sysfunc(datetime()) ; %let today_dt  = %sysfunc(date()) ;
+                        %util_dec_aco_alim_suivi_trt(ID_TRT=&MV_ID_TRT., DAT_BATCH_TRT=&MV_DAT_BATCH_TRT., NOM_TRT="CHARGEMENT_ODS", DAT_REEL_TRT=&today_dttm., 
+                                                     MESG="La table %sysfunc(STRIP(&&NOM_TAB_TAMPON_&I.)) est charg� dans ODS : %sysfunc(STRIP(&&NB_NEW_CLE&I)) NOUVELLE(S) CLE(S) et %sysfunc(STRIP(&&NB_OLD_CLE&I)) MODIFICATION(S) CLES EXISTANTES.", 
+                                                     CD_RETOUR=0) ;
+                        x "mv &&REF_FIC_ENT_&I./ok/&&NOM_FIC_&I &&REF_FIC_ENT_&I./archives/&&NOM_FIC_&I..&MV_EXTENSION." ;
+                        %put ***info &SYSRC. ;
+                        %if &SYSRC. = 0 %then %do ;
+                            %let today_dttm= %sysfunc(datetime()) ;    %let today_dt  = %sysfunc(date()) ;
+                            %util_dec_aco_alim_suivi_trt(ID_TRT=&MV_ID_TRT., DAT_BATCH_TRT=&MV_DAT_BATCH_TRT., NOM_TRT="CHARGEMENT_ODS", DAT_REEL_TRT=&today_dttm., 
+                                                         MESG="Le fichier %sysfunc(STRIP(&&NOM_FIC_&I.)) a �t� d�plac� dans le r�pertoire %sysfunc(STRIP(&&REF_FIC_ENT_&I./archives)).", 
+                                                         CD_RETOUR=0) ;
+
+                            x "zip &&REF_FIC_ENT_&I./archives/Archives_&MV_EXTENSION..zip &&REF_FIC_ENT_&I./archives/&&NOM_FIC_&I..&MV_EXTENSION. " ;
+
+                            %if &SYSRC. = 0 %then %do ;
+                                %let today_dttm= %sysfunc(datetime()) ;    %let today_dt  = %sysfunc(date()) ;
+                                %util_dec_aco_alim_suivi_trt(ID_TRT=&MV_ID_TRT., DAT_BATCH_TRT=&MV_DAT_BATCH_TRT., NOM_TRT="CHARGEMENT_ODS", DAT_REEL_TRT=&today_dttm., 
+                                                         MESG="Le fichier %sysfunc(STRIP(&&NOM_FIC_&I.)) a �t� ajout� � l'archive Archives_&MV_EXTENSION..zip.", 
+                                                         CD_RETOUR=0) ;
+
+                                x "rm &&REF_FIC_ENT_&I./archives/&&NOM_FIC_&I..&MV_EXTENSION." ;
+
+
+                            %end ;
+                            %else %do ;
+                                %let today_dttm= %sysfunc(datetime()) ;    %let today_dt  = %sysfunc(date()) ;
+                                %util_dec_aco_alim_suivi_trt(ID_TRT=&MV_ID_TRT., DAT_BATCH_TRT=&MV_DAT_BATCH_TRT., NOM_TRT="CHARGEMENT_ODS", DAT_REEL_TRT=&today_dttm., 
+                                                         MESG="Impossible d'ajouter le fichier %sysfunc(STRIP(&&NOM_FIC_&I.)) � l'archive Archives_&MV_EXTENSION..zip.", 
+                                                         CD_RETOUR=99) ;
+
+                            %end ;
+
+                            proc sql noprint ;
+                                update &lib_dec_aco_suivi..ACO_SUIVI_CHG_TAMPON_ODS
+                                        set FLG_TRAITE_ODS   = "O",
+                                            CD_STATUT_ODS    = "C",
+                                            DAT_REEL_TRT_ODS = &today_dttm.  
+                                        where ID_TRT            = &MV_ID_TRT.
+                                              and DAT_BATCH_TRT = &&MV_DAT_BATCH_TRT.
+                                              and ID_FIC        = "&&ID_FIC_&I." ;
+                            quit ;
+                        %end ;
+                        %else %do ;
+                            %let today_dttm= %sysfunc(datetime()) ;    %let today_dt  = %sysfunc(date()) ;
+                            %util_dec_aco_alim_suivi_trt(ID_TRT=&MV_ID_TRT., DAT_BATCH_TRT=&MV_DAT_BATCH_TRT., NOM_TRT="CHARGEMENT_ODS", DAT_REEL_TRT=&today_dttm., 
+                                                         MESG="Le fichier %sysfunc(STRIP(&&NOM_FIC_&I.)) n'a pas pu �tre d�plac� dans le r�pertoire %sysfunc(STRIP(&&REF_FIC_ENT_&I./archives)).", 
+                                                         CD_RETOUR=0) ;
+                        %end ;
+                    %end ;
+                %end ;
+
+                %else %do ;
+                    /* SI DES ERREURS SONT DETECTEES, PAS DE CHARGEMENT => ALIMENTATION DE LA TABLE SUIVI_TRT */
+
+                    /* NOMBRE D'ERREURS DATE, CHAR, NUM, CLE */
+                    %LET DSID   = %sysfunc(OPEN(_ERR_DATE&I,IN)) ;
+                    %LET NB_ERR_DATE&I = %sysfunc(ATTRN(&DSID,NOBS)) ;
+                    %if &DSID. > 0 %then %LET RC = %sysfunc(CLOSE(&DSID)) ;
+                    %LET DSID   = %sysfunc(OPEN(_ERR_CHAR&I,IN)) ;
+                    %LET NB_ERR_CHAR&I = %sysfunc(ATTRN(&DSID,NOBS)) ;
+                    %if &DSID. > 0 %then %LET RC = %sysfunc(CLOSE(&DSID)) ;
+                    %LET DSID   = %sysfunc(OPEN(_ERR_NUM&I,IN)) ;
+                    %LET NB_ERR_NUM&I = %sysfunc(ATTRN(&DSID,NOBS)) ;
+                    %if &DSID. > 0 %then %LET RC = %sysfunc(CLOSE(&DSID)) ;
+                    %LET DSID   = %sysfunc(OPEN(_ERR_CLE&I,IN)) ;
+                    %LET NB_ERR_CLE&I = %sysfunc(ATTRN(&DSID,NOBS)) ;
+                    %if &DSID. > 0 %then %LET RC = %sysfunc(CLOSE(&DSID)) ;
+                    %let today_dttm= %sysfunc(datetime()) ;    %let today_dt  = %sysfunc(date()) ;
+                    %util_dec_aco_alim_suivi_trt(ID_TRT=&MV_ID_TRT., DAT_BATCH_TRT=&MV_DAT_BATCH_TRT., NOM_TRT="CHARGEMENT_ODS", DAT_REEL_TRT=&today_dttm., 
+                                                 MESG="La table %sysfunc(STRIP(&&NOM_TAB_TAMPON_&I.)) contient des erreurs : %sysfunc(STRIP(&&NB_ERR_DATE&I.)) Date(s), %sysfunc(STRIP(&&NB_ERR_CHAR&I.)) Char(s), %sysfunc(STRIP(&&NB_ERR_NUM&I.)) Num(s), %sysfunc(STRIP(&&NB_ERR_CLE&I.)) Cl�(s) : Pas de chargement.", 
+                                                 CD_RETOUR=99) ;
+
+                    x "mv &&REF_FIC_ENT_&I./ok/&&NOM_FIC_&I &&REF_FIC_KO_&I./&&NOM_FIC_&I..&MV_EXTENSION." ;
+                    %let today_dttm= %sysfunc(datetime()) ;    %let today_dt  = %sysfunc(date()) ;
+
+                    %if &SYSRC. = 0 %then %do ;
+                        %util_dec_aco_alim_suivi_trt(ID_TRT=&MV_ID_TRT., DAT_BATCH_TRT=&MV_DAT_BATCH_TRT., NOM_TRT="CHARGEMENT_ODS", DAT_REEL_TRT=&today_dttm., 
+                                                     MESG="Le fichier %sysfunc(STRIP(&&NOM_FIC_&I.)) a �t� d�plac� dans le r�pertoire %sysfunc(STRIP(&&REF_FIC_KO_&I.)).", 
+                                                     CD_RETOUR=99) ;
+                    %end ;
+                    %else %do ;
+                        %util_dec_aco_alim_suivi_trt(ID_TRT=&MV_ID_TRT., DAT_BATCH_TRT=&MV_DAT_BATCH_TRT., NOM_TRT="CHARGEMENT_ODS", DAT_REEL_TRT=&today_dttm., 
+                                                     MESG="Le fichier %sysfunc(STRIP(&&NOM_FIC_&I.)) n'a pas pu �tre d�plac� dans le r�pertoire %sysfunc(STRIP(&&REF_FIC_KO_&I.)).", 
+                                                     CD_RETOUR=99) ;
+                    %end ;
+                    proc sql noprint ;
+                        update &lib_dec_aco_suivi..ACO_SUIVI_CHG_TAMPON_ODS
+                        set CD_STATUT_ODS    = "E", /* ERREUR */
+                            DAT_REEL_TRT_ODS = &today_dttm. 
+                        where ID_TRT            = &MV_ID_TRT.
+                              and DAT_BATCH_TRT = &&MV_DAT_BATCH_TRT.
+                              and ID_FIC        = "&&ID_FIC_&I." ;
+                    quit ;
+
+                %end ;
+
+/***********************************************************************************************************************************************/
+
+		%end; /* fin de section relatif � l'import des donn�es de commissionnement */
+
+/* ----------------------------------------------------------- FIN d'adaptation ---------------------------------------------------------------*/
+
+
+            /* Autre cas non pris en compte */ 
+            %else %do ;
+                %let today_dttm= %sysfunc(datetime()) ;
+                %let today_dt  = %sysfunc(date()) ;
+                x "mv &&REF_FIC_ENT_&I./ok/&&NOM_FIC_&I &&REF_FIC_KO_&I./&&NOM_FIC_&I....&MV_EXTENSION." ;
+
+                %if &SYSRC. = 0 %then %do ;
+                    %util_dec_aco_alim_suivi_trt(ID_TRT=&MV_ID_TRT., DAT_BATCH_TRT=&MV_DAT_BATCH_TRT., NOM_TRT="CHARGEMENT_ODS", DAT_REEL_TRT=&today_dttm., 
+                                                 MESG="Le fichier %sysfunc(STRIP(&&NOM_FIC_&I.)) a �t� d�plac� dans le r�pertoire %sysfunc(STRIP(&&REF_FIC_KO_&I.)).", 
+                                                 CD_RETOUR=99) ;
+                %end ;
+                %else %do ;
+                    %util_dec_aco_alim_suivi_trt(ID_TRT=&MV_ID_TRT., DAT_BATCH_TRT=&MV_DAT_BATCH_TRT., NOM_TRT="CHARGEMENT_ODS", DAT_REEL_TRT=&today_dttm., 
+                                                 MESG="Le fichier %sysfunc(STRIP(&&NOM_FIC_&I.)) n'a pas pu �tre d�plac� dans le r�pertoire %sysfunc(STRIP(&&REF_FIC_KO_&I.)).", 
+                                                 CD_RETOUR=99) ;
+                %end ;
+
+                %util_dec_aco_alim_suivi_trt(ID_TRT=&MV_ID_TRT., DAT_BATCH_TRT=&MV_DAT_BATCH_TRT., NOM_TRT="CHARGEMENT_ODS", DAT_REEL_TRT=&today_dttm., 
+                                             MESG="Pas de cl� d�finie sur la table %sysfunc(STRIP(&&NOM_TAB_TAMPON_&I.)) : Pas de chargement.", 
+                                             CD_RETOUR=99) ;
+
+                proc sql noprint ;
+                    update &lib_dec_aco_suivi..ACO_SUIVI_CHG_TAMPON_ODS
+                    set CD_STATUT_ODS    = "I",
+                        DAT_REEL_TRT_ODS = &today_dttm. 
+                    where ID_TRT            = &MV_ID_TRT.
+                          and DAT_BATCH_TRT = &&MV_DAT_BATCH_TRT.
+                          and ID_FIC        = "&&ID_FIC_&I." ;
+                quit ;
+
+            %end ;
+        %end ;
+    %end ;
+
+    %else %do ;
+
+        /* AUCUNE TABLE A CHARGER DANS ODS */
+        %let today_dttm= %sysfunc(datetime()) ;    %let today_dt  = %sysfunc(date()) ;
+        %util_dec_aco_alim_suivi_trt(ID_TRT=&MV_ID_TRT., DAT_BATCH_TRT=&MV_DAT_BATCH_TRT., NOM_TRT="CHARGEMENT_ODS", DAT_REEL_TRT=&today_dttm., 
+                                     MESG="Aucune table � charger dans la partie ODS.", 
+                                     CD_RETOUR=0) ;
+    %end ;
+/*-------------------------------------------Ajout RCO: r�cup�ration des rejet dans l'espace d'�change et ajout de l'info dans les mails de rapport d'anomalie----------------------------*/
+/*r�cup�ration du dernier ID_TRT de l'espace d�change*/
+	proc sql noprint;
+				select  max(ID_TRT) 
+					    into : ID_TRT_SE_MAX
+				from S_ACOSUI.ACO_SUIVI_BATCH;
+	quit;
+
+/*r�cup�ration des tables pr�sentant des rejets*/
+
+	proc sql;
+		create table REJET_SE as 
+			select distinct *
+			from S_ACOSUI.ACO_SUIVI_FIC 
+			where ID_TRT=&ID_TRT_SE_MAX. and NB_REJET>0;
+	quit;
+
+	proc sql noprint;
+				select  count(ID_TRT) 
+					    into : NB_REJET
+				from REJET_SE;
+	quit;
+
+   /* Mails rapport d'anomalie */
+    /* 1) Doublon sur cl�*/
+
+    %if &FLG_DBL. = O and &NB_REJET.=0 %then %do ; 
+		%LET intro_rej = <b>Pas de rejets dans espace �change</b><br><br>;
+
+		%LET intro_dbl= <b>Liste de(s) tables(s) du Tampon avec doublons:</b><br>;
+           proc sql noprint;
+             select compbl("Table " !! TABLE !! " : " !!  put(NB_DOUBLONS,8.) !! " enregistrements sur " !! put(NB_OBS_TABLE,8.) !! " au total soit " !! put(NB_DOUBLONS*100/NB_OBS_TABLE,8.2) !! " %" )
+             into: l_txt_libre_DBL separated by '<br>'
+             from S_DACSUI.ACO_SUIVI_DOUBLONS (where = (ID_TRT=&MV_ID_TRT.));
+         quit;
+         %let l_txt_libre= &intro_rej.&intro_dbl.&l_txt_libre_DBL.;
+		%put &l_txt_libre.;
+       %util_dec_aco_mail_envoi(P_ID_GROUPE=MAIL_DAC_DOUBLON_TPN, P_DAT_BATCH_TRT=&MV_DAT_BATCH_TRT., P_ID_TRT=&MV_ID_TRT., P_TYPE_MAIL=TXT_LIBRE, P_TXT_LIBRE=&l_txt_libre.); 
+    %end;
+
+    %if &FLG_DBL. = O and &NB_REJET.>0 %then %do ; 
+
+		%LET intro_dbl= <b><br><br>Liste de(s) tables(s) du Tampon avec doublons:</b><br>;
+
+           proc sql noprint;
+             select compbl("Table " !! TABLE !! " : " !!  put(NB_DOUBLONS,8.) !! " enregistrements sur " !! put(NB_OBS_TABLE,8.) !! " au total soit " !! put(NB_DOUBLONS*100/NB_OBS_TABLE,8.2) !! " %" )
+             into: l_txt_libre_DBL separated by '<br>'
+             from S_DACSUI.ACO_SUIVI_DOUBLONS (where = (ID_TRT=&MV_ID_TRT.));
+         quit;
+
+
+		%LET intro_rej= <b>Liste de(s) tables(s) de espace �change ayant des rejets:</b><br>;	
+	
+           proc sql noprint;
+             select compbl("Table " !! ID_FIC_A_CTRL !! " : " !!  put(NB_REJET,8.) !! " enregistrements sur " !! put(NB_ENREG,8.) !! " au total soit " !! put(NB_REJET*100/NB_ENREG,8.2) !! " %" )
+             into: l_txt_libre_REJ separated by '<br>'
+             from REJET_SE;
+         quit;
+         %let l_txt_libre= &intro_rej.&l_txt_libre_REJ.&intro_dbl.&l_txt_libre_DBL.;
+		%put &l_txt_libre.;
+
+       %util_dec_aco_mail_envoi(P_ID_GROUPE=MAIL_DAC_DOUBLON_TPN, P_DAT_BATCH_TRT=&MV_DAT_BATCH_TRT., P_ID_TRT=&MV_ID_TRT., P_TYPE_MAIL=TXT_LIBRE, P_TXT_LIBRE=&l_txt_libre.); 
+    %end;
+
+    %if &FLG_DBL. = N and &NB_REJET.>0 %then %do ; 
+		%LET intro_dbl= <b><br><br>Pas de Doublons dans les tables Tampons</b><br>;
+
+		%LET intro_rej=  <b>Liste de(s) tables(s) de espace �change ayant des rejets:</b><br>;		
+           proc sql noprint;
+             select compbl("Table " !! ID_FIC_A_CTRL !! " : " !!  put(NB_REJET,8.) !! " enregistrements sur " !! put(NB_ENREG,8.) !! " au total soit " !! put(NB_REJET*100/NB_ENREG,8.2) !! " %" )
+             into: l_txt_libre_REJ separated by '<br>'
+             from REJET_SE;
+         quit;
+         %let l_txt_libre= &intro_rej.&l_txt_libre_REJ.&intro_dbl.;
+		%put &l_txt_libre.;
+
+		%util_dec_aco_mail_envoi(P_ID_GROUPE=MAIL_DAC_DOUBLON_TPN, P_DAT_BATCH_TRT=&MV_DAT_BATCH_TRT., P_ID_TRT=&MV_ID_TRT., P_TYPE_MAIL=TXT_LIBRE, P_TXT_LIBRE=&l_txt_libre.); 
+    %end;
+/*--------------------------------------------------------------------------------------------------------------------------*/
+
+%util_dec_aco_alim_suivi_trt_fin(MV_ID_TRT=&MV_ID_TRT., DAT_BATCH_TRT=&MV_DAT_BATCH_TRT., NOM_TRT=CHARGEMENT_ODS, MSG=D�but Traitement CHARGEMENT_ODS) ;
+
+
+	%let today_dttm= %sysfunc(datetime()) ;    %let today_dt  = %sysfunc(date()) ;
+    %if &NB_ERR_TRT. = 0 %then %do ;
+        %util_dec_aco_alim_suivi_trt(ID_TRT=&MV_ID_TRT., DAT_BATCH_TRT=&MV_DAT_BATCH_TRT., NOM_TRT="CHARGEMENT_ODS", 
+                                     DAT_REEL_TRT=&today_dttm., MESG="Fin du traitement CHARGEMENT_ODS OK", 
+                                     CD_RETOUR=0) ;
+    %end ;
+    %else %do ;
+        %util_dec_aco_alim_suivi_trt(ID_TRT=&MV_ID_TRT., DAT_BATCH_TRT=&MV_DAT_BATCH_TRT., NOM_TRT="CHARGEMENT_ODS", 
+                                     DAT_REEL_TRT=&today_dttm., MESG="Fin du traitement CHARGEMENT_ODS KO", 
+                                     CD_RETOUR=99) ;
+    %end ;
+
+    proc printto ;
+    run ;
+
+%mend ;
